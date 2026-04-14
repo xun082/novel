@@ -1,12 +1,8 @@
-/**
- * 大纲卡片组件
- */
-
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { MarkdownContent } from "./MarkdownContent";
-import { processContent } from "./ContentProcessor";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Sparkles, FileText } from "lucide-react";
 
 interface Chapter {
   id: number;
@@ -27,118 +23,108 @@ interface OutlineCardProps {
   outline: Outline;
   isGenerating: boolean;
   onSelect: (outline: Outline) => void;
+  isSelected?: boolean;
 }
 
-export function OutlineCard({ outline, isGenerating, onSelect }: OutlineCardProps) {
-  const { thinking } = processContent(outline.rawContent);
-  
-  // 显示章节数量
+export function OutlineCard({
+  outline,
+  isGenerating,
+  onSelect,
+  isSelected = false,
+}: OutlineCardProps) {
   const chapterCount = outline.chapters?.length || 0;
+  const hasContent = Boolean(outline.rawContent);
+  const summary = outline.summary && outline.summary !== "正在生成中，请稍候..."
+    ? outline.summary
+    : "正在整理剧情脉络，请稍候...";
+
+  const actionLabel = !hasContent
+    ? "生成中..."
+    : chapterCount > 0
+      ? "选择此大纲并生成章节"
+      : "基于该结果继续生成章节";
+
+  const streamingPreview = outline.rawContent
+    .replace(/<think>[\s\S]*?<\/think>/g, "")
+    .replace(/^```(?:json)?\s*/gi, "")
+    .replace(/\s*```$/g, "")
+    .trim();
 
   return (
-    <Card 
-      className={`transition-colors ${!isGenerating ? 'cursor-pointer hover:border-primary' : ''}`}
-      onClick={() => !isGenerating && outline.rawContent && onSelect(outline)}
+    <Card
+      className={[
+        "h-full border transition-all duration-200",
+        isSelected ? "border-primary shadow-lg ring-2 ring-primary/20" : "hover:shadow-md",
+        !isGenerating && hasContent ? "cursor-pointer" : "",
+      ].join(" ")}
+      onClick={() => {
+        if (!isGenerating && hasContent) {
+          onSelect(outline);
+        }
+      }}
     >
-      <CardHeader>
-        <CardTitle className="text-xl flex items-center gap-2">
-          {outline.title}
-          <div className="flex gap-1.5">
-            {chapterCount > 0 && (
-              <Badge variant="secondary" className="text-xs">
-                {chapterCount}章
-              </Badge>
-            )}
-            {isGenerating && outline.rawContent && (
-              <Badge variant="outline" className="text-xs animate-pulse">
-                生成中
-              </Badge>
-            )}
+      <CardHeader className="space-y-4 pb-3">
+        <div className="flex items-start justify-between gap-3">
+          <CardTitle className="line-clamp-2 text-xl leading-snug">{outline.title}</CardTitle>
+          <div className="flex shrink-0 items-center gap-2">
+            {chapterCount > 0 && <Badge variant="secondary">{chapterCount} 章</Badge>}
+            {isGenerating && hasContent && <Badge variant="outline">实时更新</Badge>}
           </div>
-        </CardTitle>
-        {outline.summary && (
-          <CardDescription className="text-base leading-relaxed">
-            {outline.summary}
-          </CardDescription>
-        )}
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-3">
-          {outline.rawContent ? (
-            <>
-              {/* 显示章节列表 */}
-              {chapterCount > 0 ? (
-                <div className="max-h-80 overflow-y-auto border rounded-lg p-4 bg-slate-50 dark:bg-slate-900">
-                  <div className="text-sm font-semibold mb-3 text-slate-700 dark:text-slate-300">
-                    📖 章节大纲 ({chapterCount}章)
-                  </div>
-                  <div className="space-y-2.5">
-                    {outline.chapters.map((chapter) => (
-                      <div 
-                        key={chapter.id} 
-                        className="p-2.5 bg-white dark:bg-slate-950 rounded border border-slate-200 dark:border-slate-800"
-                      >
-                        <div className="font-medium text-sm text-slate-900 dark:text-slate-100 mb-1">
-                          {chapter.title}
-                        </div>
-                        <div className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                          {chapter.outline}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                // 如果没有解析出章节，显示原始内容（用于调试）
-                <div className="text-sm max-h-96 overflow-y-auto border-2 border-amber-300 rounded-lg p-4 bg-amber-50 dark:bg-amber-950/20">
-                  <div className="text-sm font-semibold text-amber-700 dark:text-amber-300 mb-3">
-                    ⚠️ JSON解析失败 - 调试信息
-                  </div>
-                  <div className="space-y-2">
-                    <div className="text-xs">
-                      <span className="font-semibold">内容长度：</span>
-                      <span className="text-amber-600 dark:text-amber-400">{outline.rawContent.length} 字</span>
-                    </div>
-                    <div className="text-xs">
-                      <span className="font-semibold">原始内容：</span>
-                    </div>
-                    <div className="whitespace-pre-wrap text-xs font-mono bg-white dark:bg-slate-900 p-3 rounded border max-h-64 overflow-y-auto">
-                      {outline.rawContent}
-                    </div>
-                    <div className="text-xs text-amber-600 dark:text-amber-400 mt-2">
-                      💡 提示：请查看浏览器控制台了解详细的解析错误信息
-                    </div>
-                  </div>
-                </div>
-              )}
-              
-              {/* 可选：显示深度思考部分（折叠） */}
-              {thinking && (
-                <details className="text-xs">
-                  <summary className="cursor-pointer text-blue-600 dark:text-blue-400 hover:underline">
-                    💭 查看模型思考过程
-                  </summary>
-                  <div className="mt-2 p-2 bg-blue-50 dark:bg-blue-950/30 rounded border border-blue-200 dark:border-blue-800 whitespace-pre-wrap font-mono text-xs">
-                    {thinking}
-                  </div>
-                </details>
-              )}
-            </>
-          ) : (
-            <div className="min-h-32 flex flex-col items-center justify-center gap-3">
-              <div className="animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full"></div>
-              <div className="text-sm text-muted-foreground animate-pulse">
-                正在生成大纲，请稍候...
-              </div>
-            </div>
-          )}
         </div>
-        <Button 
-          className="w-full mt-4" 
-          disabled={isGenerating || !outline.rawContent || chapterCount === 0}
-        >
-          {!outline.rawContent ? "生成中..." : (chapterCount > 0 ? "选择此大纲" : "解析中...")}
-        </Button>
+        <CardDescription className="line-clamp-3 text-sm leading-relaxed">
+          {hasContent ? summary : "正在生成大纲内容..."}
+        </CardDescription>
+      </CardHeader>
+
+      <CardContent className="space-y-4">
+        {!hasContent && (
+          <div className="space-y-2 rounded-xl border bg-muted/40 p-4">
+            <div className="h-3 w-3/5 animate-pulse rounded bg-muted" />
+            <div className="h-3 w-4/5 animate-pulse rounded bg-muted" />
+            <div className="h-3 w-2/3 animate-pulse rounded bg-muted" />
+          </div>
+        )}
+
+        {hasContent && chapterCount > 0 && (
+          <div className="rounded-xl border bg-muted/25 p-2">
+            <ScrollArea className="h-72 pr-2">
+              <div className="space-y-2 p-2">
+                {outline.chapters.map((chapter) => (
+                  <div key={chapter.id} className="rounded-lg bg-background px-3 py-2">
+                    <p className="line-clamp-1 text-sm font-medium">{chapter.title}</p>
+                    <p className="line-clamp-2 text-xs text-muted-foreground">{chapter.outline}</p>
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
+          </div>
+        )}
+
+        {hasContent && chapterCount === 0 && (
+          <div className="space-y-2">
+            <Alert className="border-amber-300/70 bg-amber-50/70">
+              <FileText className="h-4 w-4" />
+              <AlertDescription>
+                当前结果正在流式输出，内容会持续刷新。
+              </AlertDescription>
+            </Alert>
+            <div className="rounded-xl border bg-muted/25 p-2">
+              <ScrollArea className="h-72 pr-2">
+                <pre className="whitespace-pre-wrap break-words p-2 text-xs leading-relaxed text-muted-foreground">
+                  {streamingPreview || "正在生成中..."}
+                </pre>
+              </ScrollArea>
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center justify-between rounded-lg border bg-background/80 px-3 py-2 text-sm">
+          <span className="text-muted-foreground">操作</span>
+          <span className="inline-flex items-center gap-1 font-medium">
+            <Sparkles className="h-4 w-4" />
+            {actionLabel}
+          </span>
+        </div>
       </CardContent>
     </Card>
   );

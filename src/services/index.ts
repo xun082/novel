@@ -63,6 +63,26 @@ function isStreamPayload(value: unknown): value is StreamPayload {
   return Array.isArray(maybeChoices);
 }
 
+const RWKV_DEBUG = process.env.NEXT_PUBLIC_RWKV_DEBUG === "1";
+
+const debugLog = (...args: unknown[]) => {
+  if (RWKV_DEBUG) {
+    console.log(...args);
+  }
+};
+
+const debugWarn = (...args: unknown[]) => {
+  if (RWKV_DEBUG) {
+    console.warn(...args);
+  }
+};
+
+const debugError = (...args: unknown[]) => {
+  if (RWKV_DEBUG) {
+    console.error(...args);
+  }
+};
+
 // ========== RWKV Service 类 ==========
 
 class RWKVService {
@@ -117,7 +137,7 @@ class RWKVService {
     };
 
     try {
-      console.log(
+      debugLog(
         "发送API请求，stream: true, contents数量:",
         contents.length,
         "max_tokens:",
@@ -136,24 +156,24 @@ class RWKVService {
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error("API响应错误:", response.status, errorText);
+        debugError("API响应错误:", response.status, errorText);
         throw new Error(`HTTP error! status: ${response.status}, ${errorText}`);
       }
 
       // 检查响应类型
       const contentType = response.headers.get("content-type");
-      console.log("响应 Content-Type:", contentType);
+      debugLog("响应 Content-Type:", contentType);
 
       // 始终使用流式处理
       if (response.body) {
-        console.log("使用流式处理");
+        debugLog("使用流式处理");
         return await this.handleStreamResponse(response, onUpdate);
       }
 
       // 降级处理：如果没有body，尝试解析JSON
-      console.warn("响应没有body，尝试JSON解析");
+      debugWarn("响应没有body，尝试JSON解析");
       const result: RWKVResponse = await response.json();
-      console.log("API响应:", result);
+      debugLog("API响应:", result);
 
       // 如果有回调函数，立即调用
       if (onUpdate && result.choices) {
@@ -167,7 +187,7 @@ class RWKVService {
 
       return result;
     } catch (error) {
-      console.error("RWKV API 调用失败:", error);
+      debugError("RWKV API 调用失败:", error);
       throw error;
     }
   }
@@ -195,7 +215,7 @@ class RWKVService {
         const index = choice.index ?? 0;
         if (choice.finish_reason) {
           finishReasons[index] = String(choice.finish_reason);
-          console.log(`完成信号 [${index}] finish_reason: ${finishReasons[index]}`);
+          debugLog(`完成信号 [${index}] finish_reason: ${finishReasons[index]}`);
         }
 
         // 尝试提取内容（支持多种字段）
@@ -215,7 +235,7 @@ class RWKVService {
 
         // 显示增量内容的前20字，帮助确认不同index确实有不同内容
         const deltaPreview = delta.substring(0, 20).replace(/\n/g, "↵");
-        console.log(
+        debugLog(
           `内容更新 [${index}]: +${delta.length}字 "${deltaPreview}..." (总计: ${accumulatedContents[index].length}字)`,
         );
       }
@@ -231,14 +251,14 @@ class RWKVService {
       if (trimmedLine.startsWith("data:")) {
         const data = trimmedLine.replace(/^data:\s*/, "");
         if (data === "[DONE]") {
-          console.log("收到 [DONE] 标记");
+          debugLog("收到 [DONE] 标记");
           return;
         }
 
         try {
           parsed = JSON.parse(data);
         } catch {
-          console.warn("SSE 格式解析失败:", data.substring(0, 160));
+          debugWarn("SSE 格式解析失败:", data.substring(0, 160));
           return;
         }
       } else if (trimmedLine.startsWith("{")) {
@@ -246,7 +266,7 @@ class RWKVService {
         try {
           parsed = JSON.parse(trimmedLine);
         } catch {
-          console.warn("JSON 格式解析失败:", trimmedLine.substring(0, 160));
+          debugWarn("JSON 格式解析失败:", trimmedLine.substring(0, 160));
           return;
         }
       } else {
@@ -262,7 +282,7 @@ class RWKVService {
         const { done, value } = await reader.read();
 
         if (done) {
-          console.log("流式读取完成，总计接收", chunkCount, "个数据块");
+          debugLog("流式读取完成，总计接收", chunkCount, "个数据块");
           break;
         }
 
@@ -283,11 +303,11 @@ class RWKVService {
 
       // 处理剩余的buffer
       if (buffer.trim()) {
-        console.log("处理剩余buffer:", buffer.substring(0, 100));
+        debugLog("处理剩余buffer:", buffer.substring(0, 100));
         processLine(buffer);
       }
 
-      console.log(
+      debugLog(
         "流式处理完成，累积内容:",
         Object.keys(accumulatedContents).length,
         "个",
@@ -296,12 +316,12 @@ class RWKVService {
       // 显示每个index的最终统计和完整内容
       Object.entries(accumulatedContents).forEach(([indexStr, content]) => {
         const preview = content.substring(0, 50).replace(/\n/g, "↵");
-        console.log(
+        debugLog(
           `  [${indexStr}] 最终字数: ${content.length}，前50字: "${preview}..."`,
         );
-        console.log(`\n====== 完整输出 [${indexStr}] ======`);
-        console.log(content);
-        console.log(`====== 结束 [${indexStr}] ======\n`);
+        debugLog(`\n====== 完整输出 [${indexStr}] ======`);
+        debugLog(content);
+        debugLog(`====== 结束 [${indexStr}] ======\n`);
       });
 
       // 构建最终响应
@@ -379,9 +399,15 @@ class RWKVService {
       "史诗宏大",
     ];
 
-    const prompts = styles.slice(0, count).map(
-      (style) =>
-        `User: 写一份[${genre}]小说大纲，共${chapters}章。要求风格：${style}。
+    const prompts = Array.from({ length: count }, (_, index) => {
+      const style = styles[index % styles.length];
+      const batchNo = Math.floor(index / styles.length) + 1;
+      const differentiationHint =
+        batchNo > 1
+          ? `补充要求：与同风格方案保持显著差异，重点突出第${batchNo}套创意路线。`
+          : "";
+
+      return `User: 写一份[${genre}]小说大纲，共${chapters}章。要求风格：${style}。
 
 请以JSON格式输出，格式如下：
 ${jsonExample}
@@ -391,12 +417,15 @@ ${jsonExample}
 2. summary要详细（100-200字）
 3. chapters数组包含${chapters}个章节
 4. 每章outline要详细（50-100字）
+5. 保持整体节奏统一，主线清晰
 
-直接输出JSON，不要其他说明。\n\nAssistant: <think>\n</think>\n\`\`\`json\n`,
-    );
+${differentiationHint ? `${differentiationHint}\n` : ""}
 
-    console.log("生成大纲 prompts数量:", prompts.length);
-    prompts.forEach((p, i) => console.log(`  [${i}] ${p.substring(0, 60)}...`));
+直接输出JSON，不要其他说明。\n\nAssistant: <think>\n</think>\n\`\`\`json\n`;
+    });
+
+    debugLog("生成大纲 prompts数量:", prompts.length);
+    prompts.forEach((p, i) => debugLog(`  [${i}] ${p.substring(0, 60)}...`));
 
     const response = await this.call(prompts, onUpdate);
     return this.extractAllContents(response);
@@ -467,7 +496,7 @@ ${jsonExample}
 注意：内容必须完全符合本章梗概的要求。\n\nAssistant: \`\`\`json\n`,
     );
 
-    console.log("生成章节 prompts数量:", prompts.length);
+    debugLog("生成章节 prompts数量:", prompts.length);
     const response = await this.call(prompts, onUpdate);
     return this.extractAllContents(response);
   }
@@ -519,7 +548,7 @@ ${jsonExample}
 注意：扩写内容必须符合章节梗概的要求。\n\nAssistant: \`\`\`json\n`,
     );
 
-    console.log("扩写章节 prompts数量:", prompts.length);
+    debugLog("扩写章节 prompts数量:", prompts.length);
     const response = await this.call(prompts, onUpdate);
     return this.extractAllContents(response);
   }
