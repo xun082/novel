@@ -1,22 +1,15 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Label } from "@/components/ui/label";
-import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
-import { Slider } from "@/components/ui/slider";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  BookOpen,
-  Loader2,
-  Sparkles,
-  Wand2,
-} from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Loader2, Sparkles, Wand2 } from "lucide-react";
 import rwkvService from "@/services";
 import { OutlineCard } from "@/components/OutlineCard";
 import { ChapterCard } from "@/components/ChapterCard";
@@ -37,12 +30,16 @@ interface Outline {
 }
 
 type Stage = "config" | "outlines" | "chapters" | "expand";
+type WritingView = "chapters" | "outline";
+
+const OUTLINE_TOTAL = 35;
+const DEFAULT_CHAPTER_COUNT = 15;
 
 const STAGES: Array<{ key: Stage; label: string; desc: string }> = [
-  { key: "config", label: "配置参数", desc: "设置题材和规模" },
-  { key: "outlines", label: "选择大纲", desc: "并发生成并筛选" },
-  { key: "chapters", label: "生成章节", desc: "批量生成正文" },
-  { key: "expand", label: "扩写优化", desc: "统一扩写强化" },
+  { key: "config", label: "配置参数", desc: "输入题材与需求" },
+  { key: "outlines", label: "选择大纲", desc: "并发生成并筛选 35 份" },
+  { key: "chapters", label: "生成章节", desc: "基于选中大纲批量生成" },
+  { key: "expand", label: "扩写优化", desc: "统一扩写全部章节" },
 ];
 
 const isStableContent = (value: string): boolean => {
@@ -51,18 +48,65 @@ const isStableContent = (value: string): boolean => {
   return !text.includes("生成中...") && !text.includes("扩写中...");
 };
 
-export default function Home() {
-  const [genre, setGenre] = useState("玄幻");
-  const [chapterCount, setChapterCount] = useState(15);
-  const [outlineCount, setOutlineCount] = useState(3);
+const normalizeStage = (value: string | null): Stage => {
+  if (value === "config" || value === "outlines" || value === "chapters" || value === "expand") {
+    return value;
+  }
+  return "outlines";
+};
 
-  const [stage, setStage] = useState<Stage>("config");
+const normalizeWritingView = (value: string | null): WritingView => {
+  return value === "outline" ? "outline" : "chapters";
+};
+
+const createOutlinePlaceholders = (count: number): Outline[] =>
+  Array.from({ length: count }, (_, index) => ({
+    id: index + 1,
+    title: `大纲 ${index + 1}`,
+    summary: "",
+    chapters: [],
+    rawContent: "",
+  }));
+
+export default function Home() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  const [novelInput, setNovelInput] = useState("玄幻，升级流，主角成长线清晰，含宗门与秘境线。");
   const [isGenerating, setIsGenerating] = useState(false);
   const [currentStep, setCurrentStep] = useState("");
 
-  const [outlines, setOutlines] = useState<Outline[]>([]);
+  const [outlines, setOutlines] = useState<Outline[]>(() => createOutlinePlaceholders(OUTLINE_TOTAL));
   const [selectedOutline, setSelectedOutline] = useState<Outline | null>(null);
   const [activeOutlineId, setActiveOutlineId] = useState<number | null>(null);
+
+  const stage = normalizeStage(searchParams.get("step"));
+  const writingView = normalizeWritingView(searchParams.get("view"));
+
+  useEffect(() => {
+    if (searchParams.get("step")) return;
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("step", "outlines");
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  }, [pathname, router, searchParams]);
+
+  const buildStepHref = (nextStage: Stage, nextView?: WritingView): string => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("step", nextStage);
+
+    if (nextView) {
+      params.set("view", nextView);
+    } else {
+      params.delete("view");
+    }
+
+    return `${pathname}?${params.toString()}`;
+  };
+
+  const navigateStep = (nextStage: Stage, nextView?: WritingView) => {
+    router.replace(buildStepHref(nextStage, nextView), { scroll: false });
+  };
 
   const extractJSON = (text: string): Record<string, unknown> | null => {
     if (!text || text.trim().length === 0) return null;
@@ -191,32 +235,26 @@ export default function Home() {
       id: index + 1,
       title,
       summary,
-      chapters: buildChapters(jsonData, chapterCount, false),
+      chapters: buildChapters(jsonData, DEFAULT_CHAPTER_COUNT, false),
       rawContent,
     };
   };
 
   const generateOutlines = async () => {
     setIsGenerating(true);
-    setStage("outlines");
+    navigateStep("outlines");
     setActiveOutlineId(null);
     setSelectedOutline(null);
-    setCurrentStep(`正在并发生成 ${outlineCount} 个小说大纲...`);
+    setCurrentStep(`正在并发生成 ${OUTLINE_TOTAL} 个小说大纲...`);
 
-    const placeholders: Outline[] = Array.from({ length: outlineCount }, (_, index) => ({
-      id: index + 1,
-      title: `大纲 ${index + 1}`,
-      summary: "",
-      chapters: [],
-      rawContent: "",
-    }));
+    const placeholders = createOutlinePlaceholders(OUTLINE_TOTAL);
     setOutlines(placeholders);
 
     try {
       const rawOutlines = await rwkvService.generateMultipleOutlines(
-        genre,
-        chapterCount,
-        outlineCount,
+        novelInput,
+        DEFAULT_CHAPTER_COUNT,
+        OUTLINE_TOTAL,
         (index, content) => {
           setOutlines((prev) => {
             const updated = [...prev];
@@ -242,8 +280,7 @@ export default function Home() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "未知错误";
       setCurrentStep(`生成失败：${message}`);
-      setStage("config");
-      setOutlines([]);
+      setOutlines(createOutlinePlaceholders(OUTLINE_TOTAL));
     } finally {
       setIsGenerating(false);
     }
@@ -253,7 +290,7 @@ export default function Home() {
     const baseChapters =
       outline.chapters.length > 0
         ? outline.chapters
-        : buildChapters(extractJSON(outline.rawContent), chapterCount, true);
+        : buildChapters(extractJSON(outline.rawContent), DEFAULT_CHAPTER_COUNT, true);
 
     const initialOutline: Outline = {
       ...outline,
@@ -263,7 +300,7 @@ export default function Home() {
     setActiveOutlineId(outline.id);
     setSelectedOutline(initialOutline);
     setIsGenerating(true);
-    setStage("chapters");
+    navigateStep("chapters", "chapters");
     setCurrentStep(`正在并发生成 ${baseChapters.length} 个章节...`);
 
     try {
@@ -275,9 +312,7 @@ export default function Home() {
         baseChapters.map((chapter) => ({ title: chapter.title, outline: chapter.outline })),
         (index, content) => {
           const streamText = extractStreamingChapterText(content);
-          const pendingContent = streamText
-            ? `生成中...\n${streamText}`
-            : `生成中... ${content.length}字`;
+          const pendingContent = streamText ? `生成中...\n${streamText}` : `生成中... ${content.length}字`;
 
           setSelectedOutline((prev) => {
             if (!prev) return prev;
@@ -319,7 +354,7 @@ export default function Home() {
     if (!selectedOutline) return;
 
     setIsGenerating(true);
-    setStage("expand");
+    navigateStep("expand", writingView);
     setCurrentStep(`正在并发扩写 ${selectedOutline.chapters.length} 个章节...`);
 
     try {
@@ -331,9 +366,7 @@ export default function Home() {
         })),
         (index, content) => {
           const streamText = extractStreamingChapterText(content);
-          const pendingContent = streamText
-            ? `扩写中...\n${streamText}`
-            : `扩写中... ${content.length}字`;
+          const pendingContent = streamText ? `扩写中...\n${streamText}` : `扩写中... ${content.length}字`;
 
           setSelectedOutline((prev) => {
             if (!prev) return prev;
@@ -371,49 +404,27 @@ export default function Home() {
   };
 
   const resetFlow = () => {
-    setStage("config");
     setIsGenerating(false);
     setCurrentStep("");
-    setOutlines([]);
+    setOutlines(createOutlinePlaceholders(OUTLINE_TOTAL));
     setSelectedOutline(null);
     setActiveOutlineId(null);
+    navigateStep("outlines");
   };
 
-  const currentStageIndex = STAGES.findIndex((item) => item.key === stage);
-  const validOutlineCount = outlines.filter((item) => item.chapters.length > 0).length;
   const totalChapters = selectedOutline?.chapters.length || 0;
-  const completedChapters =
-    selectedOutline?.chapters.filter((chapter) => isStableContent(chapter.content)).length || 0;
-
-  const progressValue = useMemo(() => {
-    if (stage === "config") return 8;
-
-    if (stage === "outlines") {
-      const base = 20;
-      if (outlines.length === 0) return base;
-      return base + Math.round((validOutlineCount / outlines.length) * 22);
-    }
-
-    if (stage === "chapters") {
-      const base = 48;
-      if (totalChapters === 0) return base;
-      return base + Math.round((completedChapters / totalChapters) * 28);
-    }
-
-    const base = 80;
-    if (totalChapters === 0) return base;
-    return base + Math.round((completedChapters / totalChapters) * 20);
-  }, [stage, outlines.length, validOutlineCount, totalChapters, completedChapters]);
+  const completedChapters = useMemo(
+    () => selectedOutline?.chapters.filter((chapter) => isStableContent(chapter.content)).length || 0,
+    [selectedOutline],
+  );
 
   const inWritingStage = stage === "chapters" || stage === "expand";
   const canExpand = inWritingStage && Boolean(selectedOutline);
   const primaryButtonLabel = isGenerating
     ? "处理中"
     : canExpand
-      ? "一键扩写全部章节"
-      : stage === "config"
-        ? "开始生成大纲"
-        : "重新生成大纲";
+      ? "扩写"
+      : "生成";
 
   const handlePrimaryAction = () => {
     if (canExpand) {
@@ -423,273 +434,177 @@ export default function Home() {
     void generateOutlines();
   };
 
+  const handleStageSelect = (value: string) => {
+    const nextStage = normalizeStage(value);
+    if (nextStage === "chapters" || nextStage === "expand") {
+      navigateStep(nextStage, writingView);
+      return;
+    }
+    navigateStep(nextStage);
+  };
+
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_10%_20%,rgba(14,165,233,0.08),transparent_40%),radial-gradient(circle_at_90%_10%,rgba(244,114,182,0.08),transparent_45%),linear-gradient(180deg,#f8fafc,white)]">
-      <div className="mx-auto grid w-full gap-6 px-3 py-6 sm:px-4 md:px-5 xl:grid-cols-[340px_minmax(0,1fr)]">
-        <aside className="space-y-4 xl:sticky xl:top-6 xl:self-start">
-          <Card className="shadow-sm">
-            <CardHeader className="pb-4">
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-                  <BookOpen className="h-5 w-5" />
-                </div>
-                <div>
-                  <CardTitle className="text-lg">并行小说生成系统</CardTitle>
-                  <CardDescription>精简流程，专注创作</CardDescription>
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="genre">小说类型</Label>
-                <Input
-                  id="genre"
-                  value={genre}
-                  onChange={(e) => setGenre(e.target.value)}
-                  placeholder="例如：玄幻、悬疑、科幻"
-                  disabled={isGenerating}
-                />
-              </div>
+    <div className="min-h-screen w-screen overflow-x-hidden bg-[radial-gradient(circle_at_10%_20%,rgba(14,165,233,0.08),transparent_40%),radial-gradient(circle_at_90%_10%,rgba(244,114,182,0.08),transparent_45%),linear-gradient(180deg,#f8fafc,white)]">
+      <main className="w-full pb-36">
+        {(stage === "config" || stage === "outlines") && (
+          <section className="grid items-stretch gap-3 p-0 grid-cols-[repeat(auto-fill,minmax(min(100%,420px),1fr))]">
+            {outlines.map((outline) => (
+              <OutlineCard
+                key={outline.id}
+                outline={outline}
+                isGenerating={isGenerating}
+                onSelect={selectOutlineAndGenerateChapters}
+                isSelected={activeOutlineId === outline.id}
+              />
+            ))}
+          </section>
+        )}
 
-              <div className="space-y-5">
-                <div className="space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <Label>章节数</Label>
-                    <Badge variant="secondary">{chapterCount} 章</Badge>
-                  </div>
-                  <Slider
-                    value={[chapterCount]}
-                    min={5}
-                    max={50}
-                    step={1}
-                    disabled={isGenerating}
-                    onValueChange={(value) => {
-                      if (value[0] !== undefined) {
-                        setChapterCount(value[0]);
-                      }
-                    }}
-                    aria-label="章节数"
-                  />
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>5</span>
-                    <span>50</span>
-                  </div>
-                </div>
-
-                <div className="space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <Label>大纲数</Label>
-                    <Badge variant="secondary">{outlineCount} 份</Badge>
-                  </div>
-                  <Slider
-                    value={[outlineCount]}
-                    min={1}
-                    max={30}
-                    step={1}
-                    disabled={isGenerating}
-                    onValueChange={(value) => {
-                      if (value[0] !== undefined) {
-                        setOutlineCount(value[0]);
-                      }
-                    }}
-                    aria-label="大纲数"
-                  />
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>1</span>
-                    <span>30</span>
-                  </div>
-                </div>
-              </div>
-
-              <Separator />
-
-              <Button
-                onClick={handlePrimaryAction}
-                disabled={isGenerating || (!canExpand && !genre.trim())}
-                className="w-full"
-              >
-                {isGenerating ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    处理中
-                  </>
-                ) : canExpand ? (
-                  <>
-                    <Wand2 className="mr-2 h-4 w-4" />
-                    {primaryButtonLabel}
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="mr-2 h-4 w-4" />
-                    {primaryButtonLabel}
-                  </>
-                )}
-              </Button>
-
-              {(stage !== "config" || outlines.length > 0 || Boolean(selectedOutline)) && (
-                <Button variant="ghost" disabled={isGenerating} onClick={resetFlow} className="w-full">
-                  开始新任务
-                </Button>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader className="space-y-2 pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base">创作流程</CardTitle>
-                <Badge variant="secondary" className="px-2 py-0.5 text-xs">
-                  {progressValue}%
+        {(stage === "chapters" || stage === "expand") && selectedOutline && (
+          <section className="space-y-3 p-0">
+            <Card className="rounded-none border-x-0 border-t-0 border-white/60 bg-white/90 shadow-none backdrop-blur-sm">
+              <CardHeader className="space-y-3">
+                <CardTitle className="text-2xl">{selectedOutline.title}</CardTitle>
+                <CardDescription className="max-w-4xl leading-relaxed">
+                  {selectedOutline.summary || "该大纲暂无摘要，已按结构继续生成章节。"}
+                </CardDescription>
+                <Badge variant="secondary" className="w-fit">
+                  已选择此大纲并开始正文生成
                 </Badge>
-              </div>
-              <Progress value={progressValue} className="h-1.5" />
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="space-y-1.5">
-                {STAGES.map((item, index) => {
-                  const isActive = stage === item.key;
-                  const isDone = currentStageIndex > index;
-                  return (
-                    <div
-                      key={item.key}
-                      className={[
-                        "flex items-center justify-between rounded-md border px-2 py-1 text-xs",
-                        isActive && "border-primary bg-primary/5",
-                        isDone && "border-emerald-500/40 bg-emerald-50/60",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                    >
-                      <span className="text-muted-foreground">步骤 {index + 1}</span>
-                      <span className="font-medium">{item.label}</span>
-                    </div>
-                  );
-                })}
-              </div>
+              </CardHeader>
+            </Card>
 
-              <Separator />
-
-              <div className="space-y-2 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">当前阶段</span>
-                  <Badge>{STAGES[currentStageIndex]?.label || "配置参数"}</Badge>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">成功大纲</span>
-                  <span className="font-medium">
-                    {validOutlineCount}/{Math.max(outlines.length, outlineCount)}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">完成章节</span>
-                  <span className="font-medium">
-                    {completedChapters}/{totalChapters || chapterCount}
-                  </span>
-                </div>
-              </div>
-
-              {currentStep && (
-                <p className="text-xs leading-relaxed text-muted-foreground">{currentStep}</p>
-              )}
-            </CardContent>
-          </Card>
-        </aside>
-
-        <main className="space-y-5">
-          {stage === "config" && (
-            <div className="grid gap-4">
-              <Card>
+            {writingView === "chapters" ? (
+              <Card className="rounded-none border-x-0 border-white/60 bg-white/90 shadow-none backdrop-blur-sm">
                 <CardHeader>
-                  <CardTitle>开始创作</CardTitle>
-                  <CardDescription>只需三步即可完成从大纲到章节的整套内容</CardDescription>
+                  <CardTitle>章节列表</CardTitle>
+                  <CardDescription>
+                    共 {selectedOutline.chapters.length} 章，已完成 {completedChapters} 章
+                  </CardDescription>
                 </CardHeader>
-                <CardContent className="space-y-3 text-sm text-muted-foreground">
-                  <p>1. 先并发生成多份大纲，直接在列表里挑选最满意的一份。</p>
-                  <p>2. 选择后自动批量生成全部章节正文。</p>
-                  <p>3. 章节生成完成后可一键扩写全部章节。</p>
+                <CardContent>
+                  <ScrollArea className="h-[74vh] pr-4">
+                    <div className="space-y-4">
+                      {selectedOutline.chapters.map((chapter) => (
+                        <ChapterCard key={chapter.id} chapter={chapter} isGenerating={isGenerating} />
+                      ))}
+                    </div>
+                  </ScrollArea>
                 </CardContent>
               </Card>
-            </div>
-          )}
-
-          {stage === "outlines" && (
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-4">
-              {outlines.map((outline) => (
-                <OutlineCard
-                  key={outline.id}
-                  outline={outline}
-                  isGenerating={isGenerating}
-                  onSelect={selectOutlineAndGenerateChapters}
-                  isSelected={activeOutlineId === outline.id}
-                />
-              ))}
-            </div>
-          )}
-
-          {(stage === "chapters" || stage === "expand") && selectedOutline && (
-            <>
-              <Card>
-                <CardHeader className="space-y-4">
-                  <div className="space-y-2">
-                    <CardTitle className="text-2xl">{selectedOutline.title}</CardTitle>
-                    <CardDescription className="max-w-3xl leading-relaxed">
-                      {selectedOutline.summary || "该大纲暂无摘要，已按结构继续生成章节。"}
-                    </CardDescription>
-                    <Badge variant="secondary" className="w-fit">
-                      已选择此大纲并开始正文生成
-                    </Badge>
-                  </div>
+            ) : (
+              <Card className="rounded-none border-x-0 border-white/60 bg-white/90 shadow-none backdrop-blur-sm">
+                <CardHeader>
+                  <CardTitle>章节梗概总览</CardTitle>
+                  <CardDescription>通过路由切换，不再使用 Tab</CardDescription>
                 </CardHeader>
+                <CardContent className="space-y-3">
+                  {selectedOutline.chapters.map((chapter) => (
+                    <div
+                      key={chapter.id}
+                      className="rounded-xl border border-border/80 bg-muted/25 p-3 transition-colors hover:bg-muted/35"
+                    >
+                      <p className="font-medium">{chapter.title}</p>
+                      <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{chapter.outline}</p>
+                    </div>
+                  ))}
+                </CardContent>
               </Card>
+            )}
+          </section>
+        )}
 
-              <Tabs defaultValue="chapters" className="space-y-3">
-                <TabsList>
-                  <TabsTrigger value="chapters">章节内容</TabsTrigger>
-                  <TabsTrigger value="outline">大纲总览</TabsTrigger>
-                </TabsList>
+        {(stage === "chapters" || stage === "expand") && !selectedOutline && (
+          <section className="grid min-h-[52vh] place-items-center px-0 text-center">
+            <p className="text-sm text-muted-foreground">暂无已选大纲，请先回到“选择大纲”步骤。</p>
+          </section>
+        )}
+      </main>
 
-                <TabsContent value="chapters">
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>章节列表</CardTitle>
-                      <CardDescription>
-                        共 {selectedOutline.chapters.length} 章，已完成 {completedChapters} 章
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent>
-                      <ScrollArea className="h-[68vh] pr-4">
-                        <div className="space-y-4">
-                          {selectedOutline.chapters.map((chapter) => (
-                            <ChapterCard key={chapter.id} chapter={chapter} isGenerating={isGenerating} />
-                          ))}
-                        </div>
-                      </ScrollArea>
-                    </CardContent>
-                  </Card>
-                </TabsContent>
+      <div className="pointer-events-none fixed bottom-3 left-1/2 z-30 w-[min(920px,calc(100vw-24px))] -translate-x-1/2">
+        <div className="pointer-events-auto rounded-2xl border border-border/70 bg-white/90 p-2 shadow-[0_16px_45px_-20px_rgba(15,23,42,0.55)] backdrop-blur-xl">
+          <div className="rounded-2xl border border-border/70 bg-background/95 px-2.5 py-1.5">
+            <Textarea
+              value={novelInput}
+              onChange={(e) => setNovelInput(e.target.value)}
+              placeholder="给我一个小说创作方向：题材、世界观、主角设定、剧情要求。"
+              rows={2}
+              className="min-h-[56px] max-h-[120px] resize-none overflow-y-auto border-0 bg-transparent px-1 py-1 text-sm leading-6 shadow-none focus-visible:ring-0"
+            />
+            <div className="mt-1.5 flex flex-wrap items-center justify-between gap-1.5 border-t border-border/60 pt-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs text-muted-foreground">
+                  完成章节 {completedChapters}/{totalChapters || DEFAULT_CHAPTER_COUNT}
+                </span>
+                {currentStep && (
+                  <span className="max-w-[280px] truncate text-xs text-muted-foreground">{currentStep}</span>
+                )}
 
-                <TabsContent value="outline">
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>章节梗概总览</CardTitle>
-                      <CardDescription>可在此快速核对剧情结构</CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      {selectedOutline.chapters.map((chapter) => (
-                        <div key={chapter.id} className="rounded-xl border bg-muted/20 p-3">
-                          <p className="font-medium">{chapter.title}</p>
-                          <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-                            {chapter.outline}
-                          </p>
-                        </div>
-                      ))}
-                    </CardContent>
-                  </Card>
-                </TabsContent>
-              </Tabs>
-            </>
-          )}
-        </main>
+                {(stage === "chapters" || stage === "expand") && selectedOutline && (
+                  <>
+                    <Button
+                      asChild
+                      size="sm"
+                      className="h-7 rounded-md px-2.5"
+                      variant={writingView === "chapters" ? "default" : "outline"}
+                    >
+                      <Link href={buildStepHref(stage, "chapters")}>章节内容</Link>
+                    </Button>
+                    <Button
+                      asChild
+                      size="sm"
+                      className="h-7 rounded-md px-2.5"
+                      variant={writingView === "outline" ? "default" : "outline"}
+                    >
+                      <Link href={buildStepHref(stage, "outline")}>大纲总览</Link>
+                    </Button>
+                  </>
+                )}
+
+                <Select value={stage} onValueChange={handleStageSelect}>
+                  <SelectTrigger className="h-8 min-w-[132px] rounded-md px-3 text-xs font-medium">
+                    <SelectValue placeholder="阶段" />
+                  </SelectTrigger>
+                  <SelectContent align="start">
+                    {STAGES.map((item) => (
+                      <SelectItem key={item.key} value={item.key}>
+                        {item.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <Button variant="ghost" disabled={isGenerating} onClick={resetFlow} className="h-8 rounded-md px-3 text-xs">
+                  重置
+                </Button>
+                <Button
+                  onClick={handlePrimaryAction}
+                  disabled={isGenerating || (!canExpand && !novelInput.trim())}
+                  className="h-8 rounded-full px-4 text-xs"
+                >
+                  {isGenerating ? (
+                    <>
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      处理中
+                    </>
+                  ) : canExpand ? (
+                    <>
+                      <Wand2 className="mr-1.5 h-3.5 w-3.5" />
+                      {primaryButtonLabel}
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                      {primaryButtonLabel}
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
