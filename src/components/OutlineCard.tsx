@@ -17,7 +17,6 @@ interface Outline {
 
 interface OutlineCardProps {
   outline: Outline;
-  isGenerating: boolean;
   onSelect: (outline: Outline) => void;
   isSelected?: boolean;
 }
@@ -102,7 +101,7 @@ const getChapterPreviewFromJSON = (source: Record<string, unknown> | null): Chap
     return [];
   }
 
-  return rawList.slice(0, 4).map((item, index) => {
+  return rawList.map((item, index) => {
     const row = typeof item === "object" && item !== null ? (item as Record<string, unknown>) : {};
     const title =
       (typeof row.title === "string" && row.title.trim()) ||
@@ -144,9 +143,62 @@ const NODE_STYLES = [
   },
 ];
 
+const isChapterDone = (content: string): boolean => {
+  const text = content.trim();
+  if (!text) return false;
+  return !text.includes("生成中...") && !text.includes("扩写中...") && !text.includes("生成失败");
+};
+
+const getChapterContentPreview = (raw: string): { text: string; pending: boolean } => {
+  const trimmed = (raw || "").trim();
+  if (!trimmed) return { text: "", pending: false };
+
+  const pendingMatch = trimmed.match(/^(生成中|扩写中)\.\.\.\s*(?:\d+字)?\s*/);
+  const pending = Boolean(pendingMatch);
+  const body = pending ? trimmed.slice(pendingMatch![0].length).trim() : trimmed;
+
+  const noFence = body
+    .replace(/^```(?:json)?\s*/gi, "")
+    .replace(/\s*```\s*$/g, "");
+
+  let content = noFence;
+  const contentKey = noFence.match(/"content"\s*:\s*"/);
+  if (contentKey && contentKey.index !== undefined) {
+    const start = contentKey.index + contentKey[0].length;
+    let escaped = false;
+    let collected = "";
+    for (let i = start; i < noFence.length; i++) {
+      const ch = noFence[i];
+      if (escaped) {
+        escaped = false;
+        collected += ch;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (ch === "\"") break;
+      collected += ch;
+    }
+    content = collected
+      .replace(/\\n/g, "\n")
+      .replace(/\\"/g, "\"")
+      .replace(/\\\\/g, "\\");
+  } else if (noFence.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(noFence) as { content?: string };
+      if (parsed.content) content = parsed.content;
+    } catch {
+      content = noFence;
+    }
+  }
+
+  return { text: content.trim(), pending };
+};
+
 export function OutlineCard({
   outline,
-  isGenerating,
   onSelect,
   isSelected = false,
 }: OutlineCardProps) {
@@ -168,16 +220,18 @@ export function OutlineCard({
     (outline.summary && outline.summary !== "正在生成中..." ? outline.summary : "") || previewSummary;
   const chapterPreview =
     outline.chapters.length > 0 ? outline.chapters : getChapterPreviewFromJSON(parsed);
+  const totalChapters = outline.chapters.length;
+  const completedChapters = outline.chapters.filter((chapter) => isChapterDone(chapter.content)).length;
 
   return (
     <Card
       className={[
-        "h-[540px] border border-border/80 bg-white transition-all duration-200",
+        "h-full border border-border/80 bg-white transition-all duration-200",
         isSelected ? "border-primary shadow-lg ring-2 ring-primary/20" : "hover:shadow-md",
-        !isGenerating && hasContent ? "cursor-pointer" : "",
+        hasContent ? "cursor-pointer" : "",
       ].join(" ")}
       onClick={() => {
-        if (!isGenerating && hasContent) {
+        if (hasContent) {
           onSelect(outline);
         }
       }}
@@ -195,6 +249,11 @@ export function OutlineCard({
         {hasContent && (
           <div className="flex-1 overflow-y-auto rounded-xl border border-border/70 bg-white p-3">
             <p className="text-xs text-muted-foreground">大纲 {outline.id}</p>
+            {totalChapters > 0 && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                章节进度 {completedChapters}/{totalChapters}
+              </p>
+            )}
             <p className="mt-1 text-base font-semibold leading-6 text-foreground">{displayTitle}</p>
             {displaySummary ? (
               <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-foreground/90">
@@ -210,6 +269,9 @@ export function OutlineCard({
               <div className="mt-3 space-y-1.5 rounded-lg bg-muted/20 p-2.5">
                 {chapterPreview.map((chapter, index) => {
                   const nodeStyle = NODE_STYLES[index % NODE_STYLES.length];
+                  const { text: contentPreview, pending } = getChapterContentPreview(
+                    chapter.content,
+                  );
                   return (
                     <div
                       key={chapter.id}
@@ -218,12 +280,39 @@ export function OutlineCard({
                         nodeStyle.wrap,
                       ].join(" ")}
                     >
-                      <p className={["line-clamp-1 text-sm font-semibold", nodeStyle.title].join(" ")}>{chapter.title}</p>
-                    {chapter.outline && (
-                      <p className="mt-0.5 whitespace-pre-wrap text-sm leading-5 text-foreground/85">
-                        {chapter.outline}
-                      </p>
-                    )}
+                      <div className="flex items-start justify-between gap-2">
+                        <p
+                          className={[
+                            "break-words text-sm font-semibold",
+                            nodeStyle.title,
+                          ].join(" ")}
+                        >
+                          {chapter.title}
+                        </p>
+                        {contentPreview && (
+                          <span
+                            className={[
+                              "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+                              pending
+                                ? "bg-primary/10 text-primary"
+                                : "bg-emerald-100 text-emerald-700",
+                            ].join(" ")}
+                          >
+                            {pending ? "生成中" : `${contentPreview.length}字`}
+                          </span>
+                        )}
+                      </div>
+                      {contentPreview ? (
+                        <p className="mt-1 whitespace-pre-wrap break-words text-[13px] leading-6 text-foreground/85">
+                          {contentPreview}
+                        </p>
+                      ) : (
+                        chapter.outline && (
+                          <p className="mt-0.5 whitespace-pre-wrap text-sm leading-5 text-foreground/85">
+                            {chapter.outline}
+                          </p>
+                        )
+                      )}
                     </div>
                   );
                 })}

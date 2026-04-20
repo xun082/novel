@@ -32,20 +32,20 @@ interface Outline {
 type Stage = "config" | "outlines" | "chapters" | "expand";
 type WritingView = "chapters" | "outline";
 
-const OUTLINE_TOTAL = 35;
+const OUTLINE_TOTAL = 10;
 const DEFAULT_CHAPTER_COUNT = 15;
 
 const STAGES: Array<{ key: Stage; label: string; desc: string }> = [
   { key: "config", label: "配置参数", desc: "输入题材与需求" },
-  { key: "outlines", label: "选择大纲", desc: "并发生成并筛选 35 份" },
-  { key: "chapters", label: "生成章节", desc: "基于选中大纲批量生成" },
+  { key: "outlines", label: "选择大纲", desc: "先生成 10 份大纲，再按章节并发续写" },
+  { key: "chapters", label: "章节详情", desc: "查看任一大纲的章节内容" },
   { key: "expand", label: "扩写优化", desc: "统一扩写全部章节" },
 ];
 
 const isStableContent = (value: string): boolean => {
   const text = value.trim();
   if (!text) return false;
-  return !text.includes("生成中...") && !text.includes("扩写中...");
+  return !text.includes("生成中...") && !text.includes("扩写中...") && !text.includes("生成失败");
 };
 
 const normalizeStage = (value: string | null): Stage => {
@@ -90,6 +90,13 @@ export default function Home() {
     params.set("step", "outlines");
     router.replace(`${pathname}?${params.toString()}`, { scroll: false });
   }, [pathname, router, searchParams]);
+
+  useEffect(() => {
+    if (activeOutlineId === null) return;
+    const latest = outlines.find((item) => item.id === activeOutlineId);
+    if (!latest) return;
+    setSelectedOutline(latest);
+  }, [activeOutlineId, outlines]);
 
   const buildStepHref = (nextStage: Stage, nextView?: WritingView): string => {
     const params = new URLSearchParams(searchParams.toString());
@@ -240,12 +247,12 @@ export default function Home() {
     };
   };
 
-  const generateOutlines = async () => {
+  const generateOutlinesAndChapters = async () => {
     setIsGenerating(true);
     navigateStep("outlines");
     setActiveOutlineId(null);
     setSelectedOutline(null);
-    setCurrentStep(`正在并发生成 ${OUTLINE_TOTAL} 个小说大纲...`);
+    setCurrentStep(`第一轮：正在并发生成 ${OUTLINE_TOTAL} 份小说大纲（含章节梗概）...`);
 
     const placeholders = createOutlinePlaceholders(OUTLINE_TOTAL);
     setOutlines(placeholders);
@@ -257,147 +264,187 @@ export default function Home() {
         OUTLINE_TOTAL,
         (index, content) => {
           setOutlines((prev) => {
-            const updated = [...prev];
-            if (updated[index]) {
-              updated[index] = {
-                ...updated[index],
-                rawContent: content,
-                title: `大纲 ${index + 1}`,
-                summary: "正在生成中...",
-                chapters: [],
-              };
-            }
-            return updated;
+            if (!prev[index]) return prev;
+            const next = prev.slice();
+            next[index] = {
+              ...next[index],
+              rawContent: content,
+            };
+            return next;
           });
         },
       );
 
-      const parsedOutlines = rawOutlines.map((raw, index) => parseOutline(raw, index));
-      setOutlines(parsedOutlines);
+      const finalizedOutlines = rawOutlines.map((raw, index) => {
+        const parsed = parseOutline(raw, index);
+        return {
+          ...parsed,
+          chapters:
+            parsed.chapters.length > 0
+              ? parsed.chapters
+              : buildChapters(extractJSON(parsed.rawContent), DEFAULT_CHAPTER_COUNT, true),
+        };
+      });
+      setOutlines(finalizedOutlines);
 
-      const successCount = parsedOutlines.filter((item) => item.chapters.length > 0).length;
-      setCurrentStep(`大纲生成完成：${successCount}/${parsedOutlines.length}`);
+      const totalChaptersPlanned = finalizedOutlines.reduce(
+        (sum, outline) => sum + outline.chapters.length,
+        0,
+      );
+      setCurrentStep(
+        `第一轮完成：${finalizedOutlines.length} 份大纲、共 ${totalChaptersPlanned} 章梗概。点击任一大纲后进入第二轮「续写/扩写正文」。`,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "未知错误";
-      setCurrentStep(`生成失败：${message}`);
+      setCurrentStep(`大纲生成失败：${message}`);
       setOutlines(createOutlinePlaceholders(OUTLINE_TOTAL));
     } finally {
       setIsGenerating(false);
     }
   };
 
-  const selectOutlineAndGenerateChapters = async (outline: Outline) => {
-    const baseChapters =
-      outline.chapters.length > 0
-        ? outline.chapters
-        : buildChapters(extractJSON(outline.rawContent), DEFAULT_CHAPTER_COUNT, true);
-
-    const initialOutline: Outline = {
-      ...outline,
-      chapters: baseChapters,
-    };
-
+  const openOutlineDetails = (outline: Outline) => {
     setActiveOutlineId(outline.id);
-    setSelectedOutline(initialOutline);
-    setIsGenerating(true);
+    setSelectedOutline(outline);
     navigateStep("chapters", "chapters");
-    setCurrentStep(`正在并发生成 ${baseChapters.length} 个章节...`);
 
-    try {
-      const rawContents = await rwkvService.generateChapters(
-        {
-          title: outline.title,
-          summary: outline.summary,
-        },
-        baseChapters.map((chapter) => ({ title: chapter.title, outline: chapter.outline })),
-        (index, content) => {
-          const streamText = extractStreamingChapterText(content);
-          const pendingContent = streamText ? `生成中...\n${streamText}` : `生成中... ${content.length}字`;
-
-          setSelectedOutline((prev) => {
-            if (!prev) return prev;
-            return {
-              ...prev,
-              chapters: prev.chapters.map((chapter, i) =>
-                i === index ? { ...chapter, content: pendingContent } : chapter,
-              ),
-            };
-          });
-        },
+    const doneCount = outline.chapters.filter((chapter) => isStableContent(chapter.content)).length;
+    if (outline.chapters.length > 0) {
+      setCurrentStep(
+        doneCount === 0
+          ? `已打开 ${outline.title}，共 ${outline.chapters.length} 章梗概，点击「续写」开始第二轮正文生成。`
+          : `已打开 ${outline.title}，章节正文完成 ${doneCount}/${outline.chapters.length}，可继续「扩写」。`,
       );
-
-      const parsedChapters = baseChapters.map((chapter, index) => {
-        const raw = rawContents[index] || "";
-        const jsonData = extractJSON(raw);
-        const content = (jsonData?.content as string) || raw;
-        return {
-          ...chapter,
-          content,
-        };
-      });
-
-      const updated: Outline = {
-        ...initialOutline,
-        chapters: parsedChapters,
-      };
-
-      setSelectedOutline(updated);
-      setCurrentStep("章节生成完成，可以直接扩写全部章节。");
-    } catch {
-      setCurrentStep("章节生成失败，请重试。");
-    } finally {
-      setIsGenerating(false);
     }
   };
 
-  const expandAllChapters = async () => {
-    if (!selectedOutline) return;
+  const applyChapterUpdate = (
+    outlineId: number,
+    chapterIndex: number,
+    newContent: string,
+  ) => {
+    setOutlines((prev) => {
+      const outlineIdx = prev.findIndex((outline) => outline.id === outlineId);
+      if (outlineIdx === -1) return prev;
+      const target = prev[outlineIdx];
+      if (!target.chapters[chapterIndex]) return prev;
+      const chapters = target.chapters.slice();
+      chapters[chapterIndex] = { ...chapters[chapterIndex], content: newContent };
+      const next = prev.slice();
+      next[outlineIdx] = { ...target, chapters };
+      return next;
+    });
+    setSelectedOutline((prev) => {
+      if (!prev || prev.id !== outlineId) return prev;
+      if (!prev.chapters[chapterIndex]) return prev;
+      const chapters = prev.chapters.slice();
+      chapters[chapterIndex] = { ...chapters[chapterIndex], content: newContent };
+      return { ...prev, chapters };
+    });
+  };
+
+  const generateAllChapterContents = async () => {
+    const snapshot = outlines;
+    const tasks = snapshot.flatMap((outline) =>
+      outline.chapters
+        .map((chapter, chapterIndex) => ({ outline, chapter, chapterIndex }))
+        .filter(({ chapter }) => {
+          const outlineText = chapter.outline?.trim();
+          return Boolean(outlineText) && outlineText !== "待生成";
+        }),
+    );
+
+    if (tasks.length === 0) {
+      setCurrentStep("尚未生成大纲或章节梗概，无法进入第二轮。");
+      return;
+    }
+
+    const anyStableContent = tasks.some(({ chapter }) => isStableContent(chapter.content));
+    const actionLabel = anyStableContent ? "扩写" : "续写";
+    const pendingLabel = anyStableContent ? "扩写中" : "生成中";
 
     setIsGenerating(true);
-    navigateStep("expand", writingView);
-    setCurrentStep(`正在并发扩写 ${selectedOutline.chapters.length} 个章节...`);
+    setCurrentStep(
+      `第二轮：并发${actionLabel} ${tasks.length} 章（${snapshot.length} 份大纲 × 约 ${DEFAULT_CHAPTER_COUNT} 章，流式输出）...`,
+    );
+
+    const startedTasks = new Set<number>();
 
     try {
-      const rawContents = await rwkvService.expandChapters(
-        selectedOutline.chapters.map((chapter) => ({
-          title: chapter.title,
-          outline: chapter.outline,
-          currentContent: chapter.content,
-        })),
-        (index, content) => {
-          const streamText = extractStreamingChapterText(content);
-          const pendingContent = streamText ? `扩写中...\n${streamText}` : `扩写中... ${content.length}字`;
+      let rawContents: string[] = [];
 
-          setSelectedOutline((prev) => {
-            if (!prev) return prev;
-            return {
-              ...prev,
-              chapters: prev.chapters.map((chapter, i) =>
-                i === index ? { ...chapter, content: pendingContent } : chapter,
-              ),
-            };
-          });
-        },
-      );
+      if (anyStableContent) {
+        rawContents = await rwkvService.expandChapters(
+          tasks.map(({ chapter }) => ({
+            title: chapter.title,
+            outline: chapter.outline,
+            currentContent: chapter.content,
+          })),
+          (taskIndex, content) => {
+            const task = tasks[taskIndex];
+            if (!task) return;
+            if (!startedTasks.has(taskIndex)) {
+              startedTasks.add(taskIndex);
+              setCurrentStep(
+                `第二轮${actionLabel}中：已启动 ${startedTasks.size}/${tasks.length} 章`,
+              );
+            }
+            const streamText = extractStreamingChapterText(content);
+            const pending = streamText
+              ? `${pendingLabel}...\n${streamText}`
+              : `${pendingLabel}... ${content.length}字`;
+            applyChapterUpdate(task.outline.id, task.chapterIndex, pending);
+          },
+        );
+      } else {
+        rawContents = await rwkvService.generateChaptersByTasks(
+          tasks.map(({ outline, chapter, chapterIndex }) => ({
+            novelContext: {
+              title: outline.title,
+              summary: outline.summary,
+            },
+            chapter: {
+              title: chapter.title,
+              outline: chapter.outline,
+            },
+            chapterOrder: chapterIndex + 1,
+            chapterTotal: outline.chapters.length,
+          })),
+          (taskIndex, content) => {
+            const task = tasks[taskIndex];
+            if (!task) return;
+            if (!startedTasks.has(taskIndex)) {
+              startedTasks.add(taskIndex);
+              setCurrentStep(
+                `第二轮${actionLabel}中：已启动 ${startedTasks.size}/${tasks.length} 章`,
+              );
+            }
+            const streamText = extractStreamingChapterText(content);
+            const pending = streamText
+              ? `${pendingLabel}...\n${streamText}`
+              : `${pendingLabel}... ${content.length}字`;
+            applyChapterUpdate(task.outline.id, task.chapterIndex, pending);
+          },
+        );
+      }
 
-      const parsedChapters = selectedOutline.chapters.map((chapter, index) => {
-        const raw = rawContents[index] || "";
+      let successCount = 0;
+      tasks.forEach((task, taskIndex) => {
+        const raw = rawContents[taskIndex] || "";
         const jsonData = extractJSON(raw);
-        const content = (jsonData?.content as string) || raw || chapter.content;
-        return {
-          ...chapter,
-          content,
-        };
+        const finalContent = ((jsonData?.content as string) || raw || "").trim();
+        if (finalContent) {
+          applyChapterUpdate(task.outline.id, task.chapterIndex, finalContent);
+          successCount += 1;
+        }
       });
 
-      setSelectedOutline({
-        ...selectedOutline,
-        chapters: parsedChapters,
-      });
-
-      setCurrentStep("章节扩写完成。");
-    } catch {
-      setCurrentStep("扩写失败，请重试。");
+      setCurrentStep(
+        `第二轮${actionLabel}完成：成功 ${successCount}/${tasks.length} 章。`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "未知错误";
+      setCurrentStep(`${actionLabel}失败：${message}`);
     } finally {
       setIsGenerating(false);
     }
@@ -417,21 +464,50 @@ export default function Home() {
     () => selectedOutline?.chapters.filter((chapter) => isStableContent(chapter.content)).length || 0,
     [selectedOutline],
   );
+  const globalTotalChapters = useMemo(
+    () => outlines.reduce((sum, outline) => sum + outline.chapters.length, 0),
+    [outlines],
+  );
+  const globalCompletedChapters = useMemo(
+    () =>
+      outlines.reduce(
+        (sum, outline) =>
+          sum + outline.chapters.filter((chapter) => isStableContent(chapter.content)).length,
+        0,
+      ),
+    [outlines],
+  );
+
+  const outlinesReady = useMemo(
+    () => outlines.some((outline) => outline.chapters.length > 0),
+    [outlines],
+  );
+  const anyChapterContent = globalCompletedChapters > 0;
 
   const inWritingStage = stage === "chapters" || stage === "expand";
-  const canExpand = inWritingStage && Boolean(selectedOutline);
+  const progressText =
+    inWritingStage && selectedOutline
+      ? `完成章节 ${completedChapters}/${totalChapters || DEFAULT_CHAPTER_COUNT}`
+      : `完成章节 ${globalCompletedChapters}/${globalTotalChapters || OUTLINE_TOTAL * DEFAULT_CHAPTER_COUNT}`;
+
+  const isSecondRound = outlinesReady;
   const primaryButtonLabel = isGenerating
     ? "处理中"
-    : canExpand
-      ? "扩写"
-      : "生成";
+    : !isSecondRound
+      ? "生成大纲"
+      : anyChapterContent
+        ? "扩写全部"
+        : "续写全部";
+  const disablePrimaryButton =
+    isGenerating || (!isSecondRound && !novelInput.trim());
 
   const handlePrimaryAction = () => {
-    if (canExpand) {
-      void expandAllChapters();
+    if (isGenerating) return;
+    if (isSecondRound) {
+      void generateAllChapterContents();
       return;
     }
-    void generateOutlines();
+    void generateOutlinesAndChapters();
   };
 
   const handleStageSelect = (value: string) => {
@@ -446,14 +522,15 @@ export default function Home() {
   return (
     <div className="min-h-screen w-screen overflow-x-hidden bg-[radial-gradient(circle_at_10%_20%,rgba(14,165,233,0.08),transparent_40%),radial-gradient(circle_at_90%_10%,rgba(244,114,182,0.08),transparent_45%),linear-gradient(180deg,#f8fafc,white)]">
       <main className="w-full pb-36">
-        {(stage === "config" || stage === "outlines") && (
-          <section className="grid items-stretch gap-3 p-0 grid-cols-[repeat(auto-fill,minmax(min(100%,420px),1fr))]">
+        {(stage === "config" ||
+          stage === "outlines" ||
+          ((stage === "chapters" || stage === "expand") && !selectedOutline)) && (
+          <section className="grid h-[calc(100vh-120px)] grid-cols-5 grid-rows-2 items-stretch gap-3 p-3">
             {outlines.map((outline) => (
               <OutlineCard
                 key={outline.id}
                 outline={outline}
-                isGenerating={isGenerating}
-                onSelect={selectOutlineAndGenerateChapters}
+                onSelect={openOutlineDetails}
                 isSelected={activeOutlineId === outline.id}
               />
             ))}
@@ -469,7 +546,7 @@ export default function Home() {
                   {selectedOutline.summary || "该大纲暂无摘要，已按结构继续生成章节。"}
                 </CardDescription>
                 <Badge variant="secondary" className="w-fit">
-                  已选择此大纲并开始正文生成
+                  已打开此大纲的章节详情
                 </Badge>
               </CardHeader>
             </Card>
@@ -514,11 +591,6 @@ export default function Home() {
           </section>
         )}
 
-        {(stage === "chapters" || stage === "expand") && !selectedOutline && (
-          <section className="grid min-h-[52vh] place-items-center px-0 text-center">
-            <p className="text-sm text-muted-foreground">暂无已选大纲，请先回到“选择大纲”步骤。</p>
-          </section>
-        )}
       </main>
 
       <div className="pointer-events-none fixed bottom-3 left-1/2 z-30 w-[min(920px,calc(100vw-24px))] -translate-x-1/2">
@@ -533,9 +605,7 @@ export default function Home() {
             />
             <div className="mt-1.5 flex flex-wrap items-center justify-between gap-1.5 border-t border-border/60 pt-1.5">
               <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-xs text-muted-foreground">
-                  完成章节 {completedChapters}/{totalChapters || DEFAULT_CHAPTER_COUNT}
-                </span>
+                <span className="text-xs text-muted-foreground">{progressText}</span>
                 {currentStep && (
                   <span className="max-w-[280px] truncate text-xs text-muted-foreground">{currentStep}</span>
                 )}
@@ -581,7 +651,7 @@ export default function Home() {
                 </Button>
                 <Button
                   onClick={handlePrimaryAction}
-                  disabled={isGenerating || (!canExpand && !novelInput.trim())}
+                  disabled={disablePrimaryButton}
                   className="h-8 rounded-full px-4 text-xs"
                 >
                   {isGenerating ? (
@@ -589,7 +659,7 @@ export default function Home() {
                       <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                       处理中
                     </>
-                  ) : canExpand ? (
+                  ) : isSecondRound ? (
                     <>
                       <Wand2 className="mr-1.5 h-3.5 w-3.5" />
                       {primaryButtonLabel}

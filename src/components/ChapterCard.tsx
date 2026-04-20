@@ -44,6 +44,7 @@ export function ChapterCard({ chapter, isGenerating }: ChapterCardProps) {
   const contentLength = content.length;
   const shouldCollapse = contentLength > 360 && !isPendingText;
   const preview = !expanded && shouldCollapse ? `${content.slice(0, 360)}...` : content;
+  const hasRealContent = content.length > 0;
 
   return (
     <Card className={isGenerating && content ? "border-primary/40" : "border-border"}>
@@ -51,9 +52,11 @@ export function ChapterCard({ chapter, isGenerating }: ChapterCardProps) {
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-3">
             <CardTitle className="text-lg leading-snug">{chapter.title}</CardTitle>
-            <CardDescription className="rounded-lg border bg-muted/35 px-3 py-2 text-sm leading-relaxed">
-              {chapter.outline || "暂无梗概"}
-            </CardDescription>
+            {!hasRealContent && (
+              <CardDescription className="rounded-lg border bg-muted/35 px-3 py-2 text-sm leading-relaxed">
+                {chapter.outline || "暂无梗概"}
+              </CardDescription>
+            )}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Badge variant={isPendingText ? "secondary" : "default"}>
