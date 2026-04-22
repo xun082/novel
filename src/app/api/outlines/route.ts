@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
   }
 
   const genre = (payload.genre || "").trim();
-  const chapters = Math.max(1, Math.floor(payload.chapters ?? 15));
+  const chapters = Math.max(1, Math.floor(payload.chapters ?? 8));
   const count = Math.max(1, Math.floor(payload.count ?? 10));
 
   if (!genre) {
@@ -41,8 +41,10 @@ export async function POST(req: NextRequest) {
 
   const prompts = buildOutlinePrompts(genre, chapters, count);
 
+  // 大纲较长（含 N 章梗概），每条给较高 token 预算；
+  // 10 × 6000 = 60k，远低于上游总预算。
   return callUpstreamStream({
     contents: prompts,
-    maxTokens: payload.maxTokens,
+    maxTokens: payload.maxTokens ?? 6000,
   });
 }

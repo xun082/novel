@@ -53,9 +53,11 @@ export async function POST(req: NextRequest) {
 
   const prompts = buildExpandPrompts(chapters);
 
+  // 扩写后每章目标 1200-1500 字 ≈ 1500 token；
+  // 150 × 1500 = 225k 会被上游拒为空 body，所以默认取 1000，
+  // TOTAL_TOKEN_BUDGET 还会兜底按比例下调。
   return callUpstreamStream({
     contents: prompts,
-    maxTokens: payload.maxTokens,
-    batchSize: 10,
+    maxTokens: payload.maxTokens ?? 1000,
   });
 }

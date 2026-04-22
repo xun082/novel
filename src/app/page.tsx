@@ -33,13 +33,74 @@ type Stage = "config" | "outlines" | "chapters" | "expand";
 type WritingView = "chapters" | "outline";
 
 const OUTLINE_TOTAL = 10;
-const DEFAULT_CHAPTER_COUNT = 15;
+// 上游 /big_batch/completions 对「单请求 N (contents.length)」有硬上限（实测 N≥135 必空 body，
+// N=120 稳定可用）。10 × 8 = 80 有充裕余量，同时也给每条 prompt 更多 max_tokens 空间，
+// 章节正文不容易因 token 用尽而被截断。
+const DEFAULT_CHAPTER_COUNT = 8;
 
 const STAGES: Array<{ key: Stage; label: string; desc: string }> = [
   { key: "config", label: "配置参数", desc: "输入题材与需求" },
   { key: "outlines", label: "选择大纲", desc: "先生成 10 份大纲，再按章节并发续写" },
   { key: "chapters", label: "章节详情", desc: "查看任一大纲的章节内容" },
   { key: "expand", label: "扩写优化", desc: "统一扩写全部章节" },
+];
+
+interface PromptPreset {
+  label: string;
+  tagline: string;
+  prompt: string;
+  accent: string;
+}
+
+const PROMPT_PRESETS: PromptPreset[] = [
+  {
+    label: "玄幻修仙",
+    tagline: "升级流 · 宗门秘境",
+    prompt: "玄幻修仙，升级流，主角资质平平却另辟蹊径，含宗门、秘境、古神血脉。",
+    accent: "from-sky-500/90 to-cyan-500/90",
+  },
+  {
+    label: "都市职场",
+    tagline: "商战 · 逆袭",
+    prompt: "都市现代，职场商战，主角从底层实习生起步，步步为营直面家族企业博弈。",
+    accent: "from-emerald-500/90 to-teal-500/90",
+  },
+  {
+    label: "末世生存",
+    tagline: "丧尸 · 硬核",
+    prompt: "末世丧尸题材，资源稀缺、人性博弈，主角带领小队穿越废土寻找避难所。",
+    accent: "from-rose-500/90 to-orange-500/90",
+  },
+  {
+    label: "硬核科幻",
+    tagline: "星海 · 指挥官",
+    prompt: "硬科幻，星际舰队指挥官视角，跨星系战争，含外星文明与高维武器设定。",
+    accent: "from-indigo-500/90 to-purple-500/90",
+  },
+  {
+    label: "悬疑推理",
+    tagline: "连环案 · 烧脑反转",
+    prompt: "现代悬疑推理，连环凶杀案，主角是天才犯罪心理学家，双线叙事层层反转。",
+    accent: "from-slate-600/90 to-zinc-600/90",
+  },
+  {
+    label: "古代权谋",
+    tagline: "朝堂 · 党争",
+    prompt: "古代宫廷权谋，寒门状元入局朝堂，党争、夺嫡、边疆战事交织推进。",
+    accent: "from-amber-500/90 to-yellow-600/90",
+  },
+  {
+    label: "仙侠武侠",
+    tagline: "江湖 · 血海深仇",
+    prompt: "传统仙侠武侠，江湖恩怨，主角背负灭门之仇，拜师习武逐步揭开身世谜团。",
+    accent: "from-fuchsia-500/90 to-pink-500/90",
+  },
+  {
+    label: "异世冒险",
+    tagline: "穿越 · 魔法职业",
+    prompt: "异世界穿越，奇幻大陆含职业与魔法系统，主角组队探索迷宫秘境并揭露神祇阴谋。",
+    accent: "from-lime-500/90 to-green-600/90",
+  },
 ];
 
 const isStableContent = (value: string): boolean => {
@@ -247,7 +308,9 @@ export default function Home() {
     };
   };
 
-  const generateOutlinesAndChapters = async () => {
+  const generateOutlinesAndChapters = async (overridePrompt?: string) => {
+    const promptText = (overridePrompt ?? novelInput).trim();
+    if (!promptText) return;
     setIsGenerating(true);
     navigateStep("outlines");
     setActiveOutlineId(null);
@@ -259,7 +322,7 @@ export default function Home() {
 
     try {
       const rawOutlines = await rwkvService.generateMultipleOutlines(
-        novelInput,
+        promptText,
         DEFAULT_CHAPTER_COUNT,
         OUTLINE_TOTAL,
         (index, content) => {
@@ -398,7 +461,7 @@ export default function Home() {
         );
       } else {
         rawContents = await rwkvService.generateChaptersByTasks(
-          tasks.map(({ outline, chapter, chapterIndex }) => ({
+          tasks.map(({ outline, chapter }) => ({
             novelContext: {
               title: outline.title,
               summary: outline.summary,
@@ -407,8 +470,6 @@ export default function Home() {
               title: chapter.title,
               outline: chapter.outline,
             },
-            chapterOrder: chapterIndex + 1,
-            chapterTotal: outline.chapters.length,
           })),
           (taskIndex, content) => {
             const task = tasks[taskIndex];
@@ -510,6 +571,12 @@ export default function Home() {
     void generateOutlinesAndChapters();
   };
 
+  const handlePresetSelect = (prompt: string) => {
+    if (isGenerating) return;
+    setNovelInput(prompt);
+    void generateOutlinesAndChapters(prompt);
+  };
+
   const handleStageSelect = (value: string) => {
     const nextStage = normalizeStage(value);
     if (nextStage === "chapters" || nextStage === "expand") {
@@ -521,20 +588,60 @@ export default function Home() {
 
   return (
     <div className="min-h-screen w-screen overflow-x-hidden bg-[radial-gradient(circle_at_10%_20%,rgba(14,165,233,0.08),transparent_40%),radial-gradient(circle_at_90%_10%,rgba(244,114,182,0.08),transparent_45%),linear-gradient(180deg,#f8fafc,white)]">
-      <main className="w-full pb-36">
+      <main className="w-full pb-16">
         {(stage === "config" ||
           stage === "outlines" ||
           ((stage === "chapters" || stage === "expand") && !selectedOutline)) && (
-          <section className="grid h-[calc(100vh-120px)] grid-cols-5 grid-rows-2 items-stretch gap-3 p-3">
-            {outlines.map((outline) => (
-              <OutlineCard
-                key={outline.id}
-                outline={outline}
-                onSelect={openOutlineDetails}
-                isSelected={activeOutlineId === outline.id}
-              />
-            ))}
-          </section>
+          !outlinesReady && !isGenerating ? (
+            <section className="flex min-h-[calc(100vh-76px)] w-full items-center justify-center px-4">
+              <div className="w-full max-w-5xl">
+                <div className="mb-6 text-center">
+                  <h1 className="text-3xl font-semibold tracking-tight text-foreground">
+                    选一种风格，开始写你的小说
+                  </h1>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    点击任意预设即可一键并发生成 {OUTLINE_TOTAL} 份 {DEFAULT_CHAPTER_COUNT} 章的大纲；也可以在下方输入自定义需求。
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                  {PROMPT_PRESETS.map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => handlePresetSelect(preset.prompt)}
+                      className="group relative overflow-hidden rounded-xl border border-border/70 bg-white/90 p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                    >
+                      <div
+                        className={`absolute inset-x-0 top-0 h-1 bg-linear-to-r ${preset.accent}`}
+                        aria-hidden
+                      />
+                      <div className="flex items-center justify-between">
+                        <span className="text-base font-semibold text-foreground">{preset.label}</span>
+                        <Sparkles className="h-3.5 w-3.5 text-muted-foreground transition-colors group-hover:text-primary" />
+                      </div>
+                      <p className="mt-0.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
+                        {preset.tagline}
+                      </p>
+                      <p className="mt-2 line-clamp-3 text-xs leading-5 text-muted-foreground">
+                        {preset.prompt}
+                      </p>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </section>
+          ) : (
+            <section className="grid h-[calc(100vh-76px)] grid-cols-5 grid-rows-2 items-stretch gap-3 p-3">
+              {outlines.map((outline) => (
+                <OutlineCard
+                  key={outline.id}
+                  outline={outline}
+                  onSelect={openOutlineDetails}
+                  isSelected={activeOutlineId === outline.id}
+                />
+              ))}
+            </section>
+          )
         )}
 
         {(stage === "chapters" || stage === "expand") && selectedOutline && (
@@ -593,86 +700,83 @@ export default function Home() {
 
       </main>
 
-      <div className="pointer-events-none fixed bottom-3 left-1/2 z-30 w-[min(920px,calc(100vw-24px))] -translate-x-1/2">
-        <div className="pointer-events-auto rounded-2xl border border-border/70 bg-white/90 p-2 shadow-[0_16px_45px_-20px_rgba(15,23,42,0.55)] backdrop-blur-xl">
-          <div className="rounded-2xl border border-border/70 bg-background/95 px-2.5 py-1.5">
+      <div className="pointer-events-none fixed bottom-2 left-1/2 z-30 w-[min(720px,calc(100vw-24px))] -translate-x-1/2">
+        <div className="pointer-events-auto rounded-xl border border-border/70 bg-white/90 px-2 py-1.5 shadow-[0_10px_30px_-18px_rgba(15,23,42,0.55)] backdrop-blur-xl">
+          <div className="flex items-center gap-1.5">
             <Textarea
               value={novelInput}
               onChange={(e) => setNovelInput(e.target.value)}
-              placeholder="给我一个小说创作方向：题材、世界观、主角设定、剧情要求。"
-              rows={2}
-              className="min-h-[56px] max-h-[120px] resize-none overflow-y-auto border-0 bg-transparent px-1 py-1 text-sm leading-6 shadow-none focus-visible:ring-0"
+              placeholder="题材、世界观、主角设定..."
+              rows={1}
+              className="min-h-[32px] max-h-[72px] flex-1 resize-none overflow-y-auto rounded-md border border-border/60 bg-background/80 px-2 py-1 text-xs leading-5 shadow-none focus-visible:ring-0"
             />
-            <div className="mt-1.5 flex flex-wrap items-center justify-between gap-1.5 border-t border-border/60 pt-1.5">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-xs text-muted-foreground">{progressText}</span>
-                {currentStep && (
-                  <span className="max-w-[280px] truncate text-xs text-muted-foreground">{currentStep}</span>
-                )}
+            <Button variant="ghost" disabled={isGenerating} onClick={resetFlow} className="h-7 rounded-md px-2 text-xs">
+              重置
+            </Button>
+            <Button
+              onClick={handlePrimaryAction}
+              disabled={disablePrimaryButton}
+              className="h-7 rounded-full px-3 text-xs"
+            >
+              {isGenerating ? (
+                <>
+                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                  处理中
+                </>
+              ) : isSecondRound ? (
+                <>
+                  <Wand2 className="mr-1 h-3.5 w-3.5" />
+                  {primaryButtonLabel}
+                </>
+              ) : (
+                <>
+                  <Sparkles className="mr-1 h-3.5 w-3.5" />
+                  {primaryButtonLabel}
+                </>
+              )}
+            </Button>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-1.5 border-t border-border/60 pt-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[11px] leading-4 text-muted-foreground">{progressText}</span>
+              {currentStep && (
+                <span className="max-w-[260px] truncate text-[11px] leading-4 text-muted-foreground">{currentStep}</span>
+              )}
 
-                {(stage === "chapters" || stage === "expand") && selectedOutline && (
-                  <>
-                    <Button
-                      asChild
-                      size="sm"
-                      className="h-7 rounded-md px-2.5"
-                      variant={writingView === "chapters" ? "default" : "outline"}
-                    >
-                      <Link href={buildStepHref(stage, "chapters")}>章节内容</Link>
-                    </Button>
-                    <Button
-                      asChild
-                      size="sm"
-                      className="h-7 rounded-md px-2.5"
-                      variant={writingView === "outline" ? "default" : "outline"}
-                    >
-                      <Link href={buildStepHref(stage, "outline")}>大纲总览</Link>
-                    </Button>
-                  </>
-                )}
-
-                <Select value={stage} onValueChange={handleStageSelect}>
-                  <SelectTrigger className="h-8 min-w-[132px] rounded-md px-3 text-xs font-medium">
-                    <SelectValue placeholder="阶段" />
-                  </SelectTrigger>
-                  <SelectContent align="start">
-                    {STAGES.map((item) => (
-                      <SelectItem key={item.key} value={item.key}>
-                        {item.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="flex items-center gap-1.5">
-                <Button variant="ghost" disabled={isGenerating} onClick={resetFlow} className="h-8 rounded-md px-3 text-xs">
-                  重置
-                </Button>
-                <Button
-                  onClick={handlePrimaryAction}
-                  disabled={disablePrimaryButton}
-                  className="h-8 rounded-full px-4 text-xs"
-                >
-                  {isGenerating ? (
-                    <>
-                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                      处理中
-                    </>
-                  ) : isSecondRound ? (
-                    <>
-                      <Wand2 className="mr-1.5 h-3.5 w-3.5" />
-                      {primaryButtonLabel}
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="mr-1.5 h-3.5 w-3.5" />
-                      {primaryButtonLabel}
-                    </>
-                  )}
-                </Button>
-              </div>
+              {(stage === "chapters" || stage === "expand") && selectedOutline && (
+                <>
+                  <Button
+                    asChild
+                    size="sm"
+                    className="h-6 rounded-md px-2 text-[11px]"
+                    variant={writingView === "chapters" ? "default" : "outline"}
+                  >
+                    <Link href={buildStepHref(stage, "chapters")}>章节内容</Link>
+                  </Button>
+                  <Button
+                    asChild
+                    size="sm"
+                    className="h-6 rounded-md px-2 text-[11px]"
+                    variant={writingView === "outline" ? "default" : "outline"}
+                  >
+                    <Link href={buildStepHref(stage, "outline")}>大纲总览</Link>
+                  </Button>
+                </>
+              )}
             </div>
+
+            <Select value={stage} onValueChange={handleStageSelect}>
+              <SelectTrigger className="h-6 min-w-[108px] rounded-md px-2 text-[11px] font-medium">
+                <SelectValue placeholder="阶段" />
+              </SelectTrigger>
+              <SelectContent align="end">
+                {STAGES.map((item) => (
+                  <SelectItem key={item.key} value={item.key}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
         </div>
       </div>

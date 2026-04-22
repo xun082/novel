@@ -77,11 +77,12 @@ const DEFAULT_ENDPOINTS: RWKVEndpoints = {
 
 class RWKVService {
   private endpoints: RWKVEndpoints;
-  private maxTokens: number;
+  /** 可选的全局 max_tokens 覆盖值；不设则由服务端按 endpoint 选择默认值 */
+  private maxTokens?: number;
 
-  private normalizeMaxTokens(value?: number): number {
-    if (typeof value !== "number" || Number.isNaN(value)) return 7000;
-    return Math.max(6000, Math.floor(value));
+  private normalizeMaxTokens(value?: number): number | undefined {
+    if (typeof value !== "number" || Number.isNaN(value)) return undefined;
+    return Math.max(1, Math.floor(value));
   }
 
   constructor(config?: RWKVConfig) {
@@ -101,7 +102,11 @@ class RWKVService {
     payload: Record<string, unknown>,
     onUpdate?: (index: number, content: string) => void,
   ): Promise<string[]> {
-    const body = JSON.stringify({ ...payload, maxTokens: this.maxTokens });
+    const finalPayload: Record<string, unknown> = { ...payload };
+    if (typeof this.maxTokens === "number") {
+      finalPayload.maxTokens = this.maxTokens;
+    }
+    const body = JSON.stringify(finalPayload);
     debugLog(`POST ${endpoint}`, body.length, "bytes");
 
     const response = await fetch(endpoint, {
@@ -254,7 +259,7 @@ class RWKVService {
 
   async generateNovelOutline(
     genre: string = "玄幻",
-    chapters: number = 15,
+    chapters: number = 8,
     onUpdate?: (content: string) => void,
   ): Promise<string> {
     const [first] = await this.generateMultipleOutlines(
@@ -267,34 +272,94 @@ class RWKVService {
   }
 
   /**
-   * 跨多个大纲并发生成章节正文
+   * 一次性高并发生成所有章节正文：
+   *   - 前端按扁平 tasks 传入；
+   *   - service 按 novelContext 自动聚合成 { outlines: [{ title, summary, chapters }] }，
+   *     summary 每份大纲只出现一次（不因章节数重复）；
+   *   - 仅发一次 POST /api/chapters，让上游 /big_batch 在同一请求内并发跑全部 prompts；
+   *   - 服务端上游按 contents[] 下标返回，service 再按原始 tasks 顺序重排。
    */
   async generateChaptersByTasks(
     tasks: Array<{
       novelContext: { title: string; summary: string };
       chapter: { title: string; outline: string };
-      chapterOrder: number;
-      chapterTotal: number;
     }>,
     onUpdate?: (index: number, content: string) => void,
   ): Promise<string[]> {
-    return this.postAndStream(this.endpoints.chapters, { tasks }, onUpdate);
+    if (tasks.length === 0) return [];
+
+    interface Group {
+      title: string;
+      summary: string;
+      chapters: Array<{ title: string; outline: string }>;
+      /** 该 group 内第 k 个 chapter 对应的原始 task 下标 */
+      taskIndices: number[];
+    }
+
+    const groups: Group[] = [];
+    const keyToGroup = new Map<string, Group>();
+
+    for (let i = 0; i < tasks.length; i++) {
+      const { novelContext, chapter } = tasks[i];
+      const key = `${novelContext.title}\u0000${novelContext.summary}`;
+      let group = keyToGroup.get(key);
+      if (!group) {
+        group = {
+          title: novelContext.title,
+          summary: novelContext.summary,
+          chapters: [],
+          taskIndices: [],
+        };
+        keyToGroup.set(key, group);
+        groups.push(group);
+      }
+      group.chapters.push(chapter);
+      group.taskIndices.push(i);
+    }
+
+    // 上游按 contents[] 下标返回，而 contents 就是 groups 依次拼接而成。
+    // 所以 flatIndex = 组在 groups 的前缀 chapter 数 + 组内位置。
+    const flatToTaskIndex: number[] = [];
+    for (const group of groups) {
+      for (const taskIdx of group.taskIndices) {
+        flatToTaskIndex.push(taskIdx);
+      }
+    }
+
+    const outlinesPayload = groups.map((g) => ({
+      title: g.title,
+      summary: g.summary,
+      chapters: g.chapters,
+    }));
+
+    const flatResults = await this.postAndStream(
+      this.endpoints.chapters,
+      { outlines: outlinesPayload },
+      onUpdate
+        ? (flatIndex, content) => {
+            const taskIndex = flatToTaskIndex[flatIndex];
+            if (typeof taskIndex === "number") onUpdate(taskIndex, content);
+          }
+        : undefined,
+    );
+
+    const merged: string[] = Array.from({ length: tasks.length }, () => "");
+    for (let flat = 0; flat < flatResults.length; flat++) {
+      const taskIndex = flatToTaskIndex[flat];
+      if (typeof taskIndex === "number") merged[taskIndex] = flatResults[flat];
+    }
+    return merged;
   }
 
   /**
-   * 单大纲章节正文生成（保留兼容）
+   * 单大纲章节正文生成（内部仍走同一个 /api/chapters，包成单份 outlines 发送）
    */
   async generateChapters(
     novelContext: { title: string; summary: string },
     chapters: Array<{ title: string; outline: string }>,
     onUpdate?: (index: number, content: string) => void,
   ): Promise<string[]> {
-    const tasks = chapters.map((chapter, index) => ({
-      novelContext,
-      chapter,
-      chapterOrder: index + 1,
-      chapterTotal: chapters.length,
-    }));
+    const tasks = chapters.map((chapter) => ({ novelContext, chapter }));
     return this.generateChaptersByTasks(tasks, onUpdate);
   }
 

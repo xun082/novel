@@ -1,7 +1,34 @@
 const UPSTREAM = "http://154.37.222.49:8193/big_batch/completions";
 const DEFAULT_PASSWORD = "rwkv-7b13b-fyrik-13b";
-const DEFAULT_MAX_TOKENS = 7000;
-const DEFAULT_BATCH_SIZE = 10;
+const DEFAULT_MAX_TOKENS = 2000;
+/**
+ * 上游 /big_batch/completions 的真正瓶颈：
+ *
+ *   1. **N (contents.length) 有硬上限，实测 ~120-130**。
+ *      - N=120 + 44k 输入 + max_tokens=1000  ✅（实测一次 195KB 正常流式）
+ *      - N=135 任意 max_tokens（含把 combined 压到 110k） ❌ 一律 200 + 空 body
+ *      - N=150 任意 max_tokens                             ❌ 一律 200 + 空 body
+ *      → 解决办法：客户端控制 prompt 总数 ≤ 120（见 page.tsx DEFAULT_CHAPTER_COUNT）。
+ *
+ *   2. combined = input_tokens + N × max_tokens 另外还有一个软上限（~170k）。
+ *      但在 N ≤ 120 时几乎不会触及。
+ *
+ * 下面的 TOTAL_COMBINED_BUDGET 仅作为第二道保险——当真实场景确实需要很大
+ * max_tokens（例如扩写）时再切入把 max_tokens 压低。
+ */
+const TOTAL_COMBINED_BUDGET = 170_000;
+const MIN_TOKENS_PER_PROMPT = 300;
+/**
+ * 中文 prompt 的 char→token 近似系数（越小越保守）。
+ * RWKV World tokenizer 对中文大致是 1 char ≈ 1 token，取 1.0 作为最坏情况估算。
+ */
+const CHARS_PER_TOKEN_ESTIMATE = 1.0;
+
+function estimateInputTokens(contents: string[]): number {
+  let totalChars = 0;
+  for (const c of contents) totalChars += c.length;
+  return Math.ceil(totalChars / CHARS_PER_TOKEN_ESTIMATE);
+}
 
 export const NO_CACHE_HEADERS = {
   "Cache-Control": "no-store, no-cache, must-revalidate, private, max-age=0",
@@ -17,14 +44,31 @@ export interface UpstreamOptions {
   chunkSize?: number;
   stopTokens?: number[];
   password?: string;
-  /** 单次上游请求的最大 content 条数；超过后分批顺序请求 */
-  batchSize?: number;
+}
+
+function resolveMaxTokens(contents: string[], opts: UpstreamOptions): number {
+  const requested = Math.max(
+    1,
+    Math.floor(opts.maxTokens ?? DEFAULT_MAX_TOKENS),
+  );
+  const n = Math.max(1, contents.length);
+  const inputTokens = estimateInputTokens(contents);
+  const outputBudget = Math.max(
+    MIN_TOKENS_PER_PROMPT * n,
+    TOTAL_COMBINED_BUDGET - inputTokens,
+  );
+  const perPromptBudget = Math.max(
+    MIN_TOKENS_PER_PROMPT,
+    Math.floor(outputBudget / n),
+  );
+  return Math.min(requested, perPromptBudget);
 }
 
 function buildUpstreamBody(contents: string[], opts: UpstreamOptions): string {
+  const maxTokens = resolveMaxTokens(contents, opts);
   return JSON.stringify({
     contents,
-    max_tokens: Math.max(6000, opts.maxTokens ?? DEFAULT_MAX_TOKENS),
+    max_tokens: maxTokens,
     stop_tokens: opts.stopTokens ?? [0],
     temperature: opts.temperature ?? 0.9,
     chunk_size: opts.chunkSize ?? 8,
@@ -33,182 +77,233 @@ function buildUpstreamBody(contents: string[], opts: UpstreamOptions): string {
   });
 }
 
+const LOG_PROGRESS_INTERVAL_MS = 5000;
+
 /**
- * 重新生成一行 SSE/NDJSON，把其中的 choices[].index 加上 offset。
- * 返回已序列化的一行（不含结尾换行），或 null 表示忽略该行。
+ * 一次性把 opts.contents 全部送给上游 `/big_batch/completions`。
+ * 上游的 contents 数组本身就是并发维度（数组长度 = 并发条数），
+ * 因此无需在本层再做分批 / worker pool。
+ *
+ * 特点：
+ *   - 逐 chunk passthrough（不做缓冲）。
+ *   - 每 5 秒打印一次代理进度（chunks/bytes/ETA 首字节时间）。
+ *   - 上游/下游任何一端断开，都会把另一端一起关掉，避免 ERR_INVALID_STATE 和算力浪费。
  */
-function rewriteLineWithOffset(line: string, offset: number): string | null {
-  const trimmed = line.trim();
-  if (!trimmed) return null;
-
-  let prefix = "";
-  let jsonText: string | null = null;
-
-  if (trimmed.startsWith("data:")) {
-    prefix = "data: ";
-    const data = trimmed.replace(/^data:\s*/, "");
-    if (data === "[DONE]") return null;
-    jsonText = data;
-  } else if (trimmed.startsWith("{")) {
-    jsonText = trimmed;
-  } else {
-    return null;
-  }
-
-  try {
-    const payload = JSON.parse(jsonText) as {
-      choices?: Array<{ index?: number; [key: string]: unknown }>;
-      [key: string]: unknown;
-    };
-    if (Array.isArray(payload.choices)) {
-      for (const choice of payload.choices) {
-        if (typeof choice.index === "number") {
-          choice.index = choice.index + offset;
-        } else if (offset > 0) {
-          choice.index = offset;
-        }
-      }
-    }
-    return `${prefix}${JSON.stringify(payload)}`;
-  } catch {
-    return null;
-  }
-}
-
-async function pipeBatchToController(
-  batchContents: string[],
-  offset: number,
-  opts: UpstreamOptions,
-  controller: ReadableStreamDefaultController<Uint8Array>,
-  encoder: TextEncoder,
-): Promise<{ ok: boolean; error?: string }> {
-  const upstream = await fetch(UPSTREAM, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Cache-Control": "no-store",
-    },
-    body: buildUpstreamBody(batchContents, opts),
-    cache: "no-store",
-  });
-
-  if (!upstream.ok || !upstream.body) {
-    const text = upstream.body ? await upstream.text() : "";
-    return {
-      ok: false,
-      error: `batch@${offset} upstream ${upstream.status} ${text.slice(0, 200)}`,
-    };
-  }
-
-  const reader = upstream.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const raw of lines) {
-        const rewritten = rewriteLineWithOffset(raw, offset);
-        if (rewritten !== null) {
-          controller.enqueue(encoder.encode(`${rewritten}\n\n`));
-        }
-      }
-    }
-    if (buffer.trim()) {
-      const rewritten = rewriteLineWithOffset(buffer, offset);
-      if (rewritten !== null) {
-        controller.enqueue(encoder.encode(`${rewritten}\n\n`));
-      }
-    }
-    return { ok: true };
-  } finally {
-    reader.releaseLock();
-  }
-}
-
 export async function callUpstreamStream(opts: UpstreamOptions): Promise<Response> {
   const total = opts.contents.length;
-  const batchSize = Math.max(1, opts.batchSize ?? DEFAULT_BATCH_SIZE);
+  const startedAt = Date.now();
+  const requestId = Math.random().toString(36).slice(2, 8);
+  const effectiveMaxTokens = resolveMaxTokens(opts.contents, opts);
 
-  // 单批无需合并，直通上游即可
-  if (total <= batchSize) {
-    const upstream = await fetch(UPSTREAM, {
+  // 输入 prompt 规模统计（字符，用于粗略 token 估算：中文 ~1.5 char/token）
+  let promptTotalChars = 0;
+  let promptMin = Infinity;
+  let promptMax = 0;
+  for (const c of opts.contents) {
+    promptTotalChars += c.length;
+    if (c.length < promptMin) promptMin = c.length;
+    if (c.length > promptMax) promptMax = c.length;
+  }
+  const promptAvg = Math.round(promptTotalChars / Math.max(1, total));
+  const body = buildUpstreamBody(opts.contents, opts);
+  const estInputTokens = estimateInputTokens(opts.contents);
+  const estOutputTokens = total * effectiveMaxTokens;
+  const estCombined = estInputTokens + estOutputTokens;
+
+  console.log(
+    `[rwkv:${requestId}] sending ${total} prompts (max_tokens=${effectiveMaxTokens}, est_output=${estOutputTokens}, est_input=${estInputTokens}, est_combined=${estCombined}/${TOTAL_COMBINED_BUDGET})`,
+  );
+  console.log(
+    `[rwkv:${requestId}]   prompt_chars min/avg/max=${promptMin}/${promptAvg}/${promptMax} total_input_chars=${promptTotalChars} body_bytes=${body.length}`,
+  );
+
+  const abortController = new AbortController();
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(UPSTREAM, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
       },
-      body: buildUpstreamBody(opts.contents, opts),
+      body,
       cache: "no-store",
+      signal: abortController.signal,
+      // @ts-expect-error undici-specific：禁用响应体超时与长度上限
+      duplex: "half",
     });
-
-    if (!upstream.ok) {
-      const text = await upstream.text();
-      console.error("[rwkv] upstream error", upstream.status, text.slice(0, 300));
-      return new Response(text, {
-        status: upstream.status,
-        headers: NO_CACHE_HEADERS,
-      });
-    }
-
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers: {
-        "Content-Type":
-          upstream.headers.get("Content-Type") ?? "text/event-stream",
-        ...NO_CACHE_HEADERS,
+  } catch (err) {
+    console.error(`[rwkv:${requestId}] upstream fetch failed`, err);
+    return new Response(
+      JSON.stringify({ error: (err as Error)?.message ?? "upstream fetch failed" }),
+      {
+        status: 502,
+        headers: { "Content-Type": "application/json", ...NO_CACHE_HEADERS },
       },
+    );
+  }
+
+  const allHeaders: Record<string, string> = {};
+  upstream.headers.forEach((v, k) => {
+    allHeaders[k] = v;
+  });
+  console.log(
+    `[rwkv:${requestId}] upstream status=${upstream.status} t=${Date.now() - startedAt}ms headers=${JSON.stringify(allHeaders)}`,
+  );
+
+  if (!upstream.ok || !upstream.body) {
+    const text = upstream.body ? await upstream.text() : "";
+    console.error(
+      `[rwkv:${requestId}] upstream error`,
+      upstream.status,
+      text.slice(0, 600),
+    );
+    return new Response(text || `upstream ${upstream.status}`, {
+      status: upstream.status || 502,
+      headers: NO_CACHE_HEADERS,
     });
   }
 
-  // 多批：手动组合成一条 SSE 返回
-  const encoder = new TextEncoder();
-  const totalBatches = Math.ceil(total / batchSize);
-  console.log(
-    `[rwkv] batching ${total} prompts into ${totalBatches} batches of ${batchSize}`,
-  );
+  const upstreamBody = upstream.body;
+  let downstreamCancelled = false;
 
-  const stream = new ReadableStream<Uint8Array>({
+  const passthrough = new ReadableStream<Uint8Array>({
     async start(controller) {
+      const reader = upstreamBody.getReader();
+      let chunks = 0;
+      let bytes = 0;
+      let firstByteAt: number | null = null;
+      let lastReport = Date.now();
+
+      const safeClose = () => {
+        try {
+          controller.close();
+        } catch {
+          // ignore double-close
+        }
+      };
+
       try {
-        for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
-          const offset = batchIdx * batchSize;
-          const slice = opts.contents.slice(offset, offset + batchSize);
-          console.log(
-            `[rwkv] batch ${batchIdx + 1}/${totalBatches} (offset=${offset}, size=${slice.length})`,
-          );
-          try {
-            const result = await pipeBatchToController(
-              slice,
-              offset,
-              opts,
-              controller,
-              encoder,
-            );
-            if (!result.ok) {
-              console.error(`[rwkv] batch ${batchIdx + 1} failed: ${result.error}`);
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (downstreamCancelled) {
+            try {
+              await reader.cancel();
+            } catch {
+              // ignore
             }
+            break;
+          }
+          if (firstByteAt === null) {
+            firstByteAt = Date.now() - startedAt;
+            console.log(
+              `[rwkv:${requestId}] first chunk at ${firstByteAt}ms (${value.length}B)`,
+            );
+          }
+          chunks += 1;
+          bytes += value.length;
+          try {
+            controller.enqueue(value);
           } catch (err) {
-            console.error(`[rwkv] batch ${batchIdx + 1} threw`, err);
+            console.log(
+              `[rwkv:${requestId}] downstream enqueue failed, stopping`,
+              (err as Error)?.message,
+            );
+            downstreamCancelled = true;
+            try {
+              abortController.abort();
+            } catch {
+              // ignore
+            }
+            try {
+              await reader.cancel();
+            } catch {
+              // ignore
+            }
+            break;
+          }
+
+          const now = Date.now();
+          if (now - lastReport >= LOG_PROGRESS_INTERVAL_MS) {
+            console.log(
+              `[rwkv:${requestId}] streaming t+${((now - startedAt) / 1000).toFixed(
+                1,
+              )}s chunks=${chunks} bytes=${bytes}`,
+            );
+            lastReport = now;
           }
         }
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-      } catch (error) {
-        console.error("[rwkv] batched stream error", error);
+        const ms = Date.now() - startedAt;
+        console.log(
+          `[rwkv:${requestId}] upstream closed: chunks=${chunks} bytes=${bytes} total=${(ms / 1000).toFixed(1)}s`,
+        );
+        if (chunks === 0 && bytes === 0 && !downstreamCancelled) {
+          console.error(
+            `[rwkv:${requestId}] ⚠️ upstream returned status=200 but EMPTY body. 通常是：input_tokens+output_tokens 超上游额度 / 上游过载。`,
+          );
+          try {
+            const fs = await import("node:fs");
+            const path = `/tmp/rwkv-empty-${requestId}-${Date.now()}.json`;
+            fs.writeFileSync(path, body);
+            console.error(
+              `[rwkv:${requestId}] 已保存失败请求体到 ${path}，可用脚本重放复现：`,
+            );
+            console.error(
+              `[rwkv:${requestId}]   curl -sS -X POST '${UPSTREAM}' -H 'Content-Type: application/json' --data @${path} -N | head`,
+            );
+          } catch (e) {
+            console.error(`[rwkv:${requestId}] dump body failed`, e);
+          }
+        }
+        safeClose();
+      } catch (err) {
+        const e = err as { name?: string; code?: string; message?: string };
+        const aborted = e?.name === "AbortError" || downstreamCancelled;
+        const ms = Date.now() - startedAt;
+        if (aborted) {
+          console.log(
+            `[rwkv:${requestId}] upstream aborted after ${(ms / 1000).toFixed(1)}s (chunks=${chunks} bytes=${bytes})`,
+          );
+        } else {
+          console.error(
+            `[rwkv:${requestId}] upstream stream error after ${(ms / 1000).toFixed(1)}s (chunks=${chunks} bytes=${bytes})`,
+            e?.code ?? "",
+            e?.message ?? err,
+          );
+        }
+        safeClose();
       } finally {
-        controller.close();
+        try {
+          reader.releaseLock();
+        } catch {
+          // ignore
+        }
+      }
+    },
+    cancel(reason) {
+      downstreamCancelled = true;
+      console.log(
+        `[rwkv:${requestId}] downstream cancelled after ${(
+          (Date.now() - startedAt) /
+          1000
+        ).toFixed(1)}s`,
+        reason,
+      );
+      try {
+        abortController.abort();
+      } catch {
+        // ignore
       }
     },
   });
 
-  return new Response(stream, {
-    status: 200,
+  return new Response(passthrough, {
+    status: upstream.status,
     headers: {
-      "Content-Type": "text/event-stream",
+      "Content-Type":
+        upstream.headers.get("Content-Type") ?? "text/event-stream",
       ...NO_CACHE_HEADERS,
     },
   });
@@ -270,46 +365,23 @@ ${differentiation ? `${differentiation}\n` : ""}
 export interface ChapterTaskInput {
   novelContext: { title: string; summary: string };
   chapter: { title: string; outline: string };
-  chapterOrder: number;
-  chapterTotal: number;
+  /** 仅保留作兼容字段，不再写入 prompt（上游已按 contents[] 下标自动对齐 index） */
+  chapterOrder?: number;
+  chapterTotal?: number;
 }
 
+/**
+ * 极简章节 prompt —— 只保留模型真正需要的信息：
+ * 小说标题、整体梗概、本章标题、本章梗概，以及 600-800 字 + JSON 输出约束。
+ * 其余样板（⚠️ 核心要求 / 写作任务 / 格式要求…）全部删掉，避免 N 条 × 重复废话
+ * 把上游的 input token 额度撑爆。
+ */
 export function buildChapterPrompts(tasks: ChapterTaskInput[]): string[] {
-  const jsonExample = `{
-  "content": "章节正文内容（800-1200字）"
-}`;
-
   return tasks.map(
-    ({ novelContext, chapter, chapterOrder, chapterTotal }) =>
-      `User: 写小说章节正文，严格按照章节梗概展开剧情。
-
-【小说背景】
-标题：${novelContext.title}
+    ({ novelContext, chapter }) =>
+      `User: 写小说《${novelContext.title}》的一章正文，600-800字，仅输出 JSON：{"content":"..."}。
 整体梗概：${novelContext.summary}
-
-【当前章节】
-章节：${chapter.title}（第 ${chapterOrder}/${chapterTotal} 章）
-本章梗概：${chapter.outline}
-
-【写作任务】
-⚠️ 核心要求：必须严格按照"本章梗概"描述的剧情来写！
-
-1. 仔细阅读本章梗概，理解核心剧情和发展要点
-2. 完整展现梗概中的所有关键情节
-3. 不要添加梗概外的剧情，不要偏离主线
-4. 适当添加对话、动作、环境描写等细节
-5. 严格控制字数：600-800字
-6. 只写这一章，不要涉及其他章节
-
-【格式要求】
-- 小说正文格式，段落间用空行（\\n\\n）分隔
-- 以JSON格式输出
-- 不要添加任何额外说明或标记
-
-【输出格式】
-${jsonExample}
-
-注意：内容必须完全符合本章梗概的要求。\n\nAssistant: \`\`\`json\n`,
+本章：${chapter.title} —— ${chapter.outline}\n\nAssistant: \`\`\`json\n`,
   );
 }
 
@@ -320,41 +392,10 @@ export interface ExpandTaskInput {
 }
 
 export function buildExpandPrompts(tasks: ExpandTaskInput[]): string[] {
-  const jsonExample = `{
-  "content": "扩写后的完整内容（1500-2000字）"
-}`;
-
   return tasks.map(
-    (chapter) =>
-      `User: 扩写小说章节，严格按照章节梗概进行扩写。
-
-【章节信息】
-标题：${chapter.title}
-章节梗概：${chapter.outline}
-当前字数：${chapter.currentContent.length}字
-
-【现有内容】
-${chapter.currentContent}
-
-【扩写任务】
-⚠️ 重要：必须严格按照"章节梗概"中描述的剧情进行扩写！
-
-1. 仔细阅读章节梗概，理解本章的核心剧情和发展方向
-2. 在现有内容基础上续写，推进梗概中描述的剧情
-3. 确保扩写内容完整覆盖梗概中的所有关键情节
-4. 增加对话、动作、心理活动等细节描写
-5. 扩写后总字数控制在1200-1500字
-6. 不要偏离梗概，不要添加梗概外的剧情
-
-【写作要求】
-- 紧扣章节梗概，逐步展开梗概中的情节
-- 保持原文风格和叙事节奏
-- 段落之间用空行（\\n\\n）分隔
-- 以JSON格式输出完整内容
-
-【输出格式】
-${jsonExample}
-
-注意：扩写内容必须符合章节梗概的要求。\n\nAssistant: \`\`\`json\n`,
+    ({ title, outline, currentContent }) =>
+      `User: 扩写下面这章到 700-900 字，贴合梗概，仅输出 JSON：{"content":"..."}。
+章节：${title} —— ${outline}
+原文：${currentContent}\n\nAssistant: \`\`\`json\n`,
   );
 }

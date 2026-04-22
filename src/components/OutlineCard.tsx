@@ -248,13 +248,15 @@ export function OutlineCard({
 
         {hasContent && (
           <div className="flex-1 overflow-y-auto rounded-xl border border-border/70 bg-white p-3">
-            <p className="text-xs text-muted-foreground">大纲 {outline.id}</p>
-            {totalChapters > 0 && (
-              <p className="mt-1 text-xs text-muted-foreground">
-                章节进度 {completedChapters}/{totalChapters}
-              </p>
-            )}
-            <p className="mt-1 text-base font-semibold leading-6 text-foreground">{displayTitle}</p>
+            <div className="flex items-center justify-between gap-2 text-[11px] leading-4 text-muted-foreground">
+              <span>大纲 {outline.id}</span>
+              {totalChapters > 0 && (
+                <span>
+                  {completedChapters}/{totalChapters}
+                </span>
+              )}
+            </div>
+            <p className="mt-0.5 text-base font-semibold leading-6 text-foreground">{displayTitle}</p>
             {displaySummary ? (
               <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-foreground/90">
                 {displaySummary}
