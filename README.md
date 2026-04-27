@@ -53,4 +53,4 @@ pnpm dev
 
 > 下图为当前项目界面截图（多卡片并行大纲视图）：
 
-![Novel 项目截图](https://raw.githubusercontent.com/xun082/md/main/blogs.images20260424171658.png)
+![20260427192647](https://raw.githubusercontent.com/xun082/md/main/blogs.images20260427192647.png)
