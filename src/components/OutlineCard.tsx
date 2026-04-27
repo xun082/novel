@@ -1,4 +1,5 @@
 import { Card, CardContent } from "@/components/ui/card";
+import { normalizeChapterContent } from "@/lib/novel-data";
 
 interface Chapter {
   id: number;
@@ -126,20 +127,20 @@ const getChapterPreviewFromJSON = (source: Record<string, unknown> | null): Chap
 
 const NODE_STYLES = [
   {
-    wrap: "border-l-2 border-l-sky-500/70 bg-sky-50/55",
-    title: "text-sky-900",
+    wrap: "border-l-2 border-l-sky-400/75 bg-sky-500/12",
+    title: "text-sky-200",
   },
   {
-    wrap: "border-l-2 border-l-emerald-500/70 bg-emerald-50/55",
-    title: "text-emerald-900",
+    wrap: "border-l-2 border-l-emerald-400/75 bg-emerald-500/12",
+    title: "text-emerald-200",
   },
   {
-    wrap: "border-l-2 border-l-amber-500/70 bg-amber-50/55",
-    title: "text-amber-900",
+    wrap: "border-l-2 border-l-amber-400/80 bg-amber-500/12",
+    title: "text-amber-200",
   },
   {
-    wrap: "border-l-2 border-l-violet-500/70 bg-violet-50/55",
-    title: "text-violet-900",
+    wrap: "border-l-2 border-l-violet-400/80 bg-violet-500/12",
+    title: "text-violet-200",
   },
 ];
 
@@ -156,45 +157,7 @@ const getChapterContentPreview = (raw: string): { text: string; pending: boolean
   const pendingMatch = trimmed.match(/^(生成中|扩写中)\.\.\.\s*(?:\d+字)?\s*/);
   const pending = Boolean(pendingMatch);
   const body = pending ? trimmed.slice(pendingMatch![0].length).trim() : trimmed;
-
-  const noFence = body
-    .replace(/^```(?:json)?\s*/gi, "")
-    .replace(/\s*```\s*$/g, "");
-
-  let content = noFence;
-  const contentKey = noFence.match(/"content"\s*:\s*"/);
-  if (contentKey && contentKey.index !== undefined) {
-    const start = contentKey.index + contentKey[0].length;
-    let escaped = false;
-    let collected = "";
-    for (let i = start; i < noFence.length; i++) {
-      const ch = noFence[i];
-      if (escaped) {
-        escaped = false;
-        collected += ch;
-        continue;
-      }
-      if (ch === "\\") {
-        escaped = true;
-        continue;
-      }
-      if (ch === "\"") break;
-      collected += ch;
-    }
-    content = collected
-      .replace(/\\n/g, "\n")
-      .replace(/\\"/g, "\"")
-      .replace(/\\\\/g, "\\");
-  } else if (noFence.startsWith("{")) {
-    try {
-      const parsed = JSON.parse(noFence) as { content?: string };
-      if (parsed.content) content = parsed.content;
-    } catch {
-      content = noFence;
-    }
-  }
-
-  return { text: content.trim(), pending };
+  return { text: normalizeChapterContent(body), pending };
 };
 
 export function OutlineCard({
@@ -222,16 +185,17 @@ export function OutlineCard({
     outline.chapters.length > 0 ? outline.chapters : getChapterPreviewFromJSON(parsed);
   const totalChapters = outline.chapters.length;
   const completedChapters = outline.chapters.filter((chapter) => isChapterDone(chapter.content)).length;
+  const canOpenDetails = hasContent;
 
   return (
     <Card
       className={[
-        "h-full border border-border/80 bg-white transition-all duration-200",
-        isSelected ? "border-primary shadow-lg ring-2 ring-primary/20" : "hover:shadow-md",
-        hasContent ? "cursor-pointer" : "",
+        "h-full border border-border/80 bg-card/80 backdrop-blur-sm transition-all duration-200",
+        isSelected && canOpenDetails ? "border-primary shadow-lg ring-2 ring-primary/20" : "",
+        canOpenDetails ? "cursor-pointer hover:shadow-md" : "",
       ].join(" ")}
       onClick={() => {
-        if (hasContent) {
+        if (canOpenDetails) {
           onSelect(outline);
         }
       }}
@@ -247,7 +211,7 @@ export function OutlineCard({
         )}
 
         {hasContent && (
-          <div className="flex-1 overflow-y-auto rounded-xl border border-border/70 bg-white p-3">
+          <div className="flex-1 overflow-y-auto rounded-xl border border-border/70 bg-card/70 p-3">
             <div className="flex items-center justify-between gap-2 text-[11px] leading-4 text-muted-foreground">
               <span>大纲 {outline.id}</span>
               {totalChapters > 0 && (
@@ -262,7 +226,7 @@ export function OutlineCard({
                 {displaySummary}
               </p>
             ) : (
-              <pre className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-foreground/90">
+              <pre className="mt-2 whitespace-pre-wrap wrap-break-word text-sm leading-6 text-foreground/90">
                 {streamingPreview || "正在生成中..."}
               </pre>
             )}
@@ -297,7 +261,7 @@ export function OutlineCard({
                               "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
                               pending
                                 ? "bg-primary/10 text-primary"
-                                : "bg-emerald-100 text-emerald-700",
+                                : "bg-emerald-500/15 text-emerald-300",
                             ].join(" ")}
                           >
                             {pending ? "生成中" : `${contentPreview.length}字`}
