@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 /**
  * Markdown 内容渲染组件
  * 支持基本的 markdown 格式
@@ -8,14 +10,14 @@ interface MarkdownContentProps {
 }
 
 // 解析内联格式（加粗、斜体）
-function parseInlineFormats(text: string): (string | JSX.Element)[] {
-  const parts: (string | JSX.Element)[] = [];
+function parseInlineFormats(text: string): ReactNode[] {
+  const parts: ReactNode[] = [];
   let currentIndex = 0;
   let keyCounter = 0;
 
   // 匹配加粗 **text** 和斜体 *text*
   const regex = /(\*\*(.+?)\*\*|\*(.+?)\*)/g;
-  let match;
+  let match: RegExpExecArray | null;
 
   while ((match = regex.exec(text)) !== null) {
     // 添加前面的普通文本
@@ -56,8 +58,8 @@ export function MarkdownContent({ content }: MarkdownContentProps) {
 
   // 解析 markdown 内容
   const lines = content.split('\n');
-  const elements: JSX.Element[] = [];
-  let listItems: JSX.Element[] = [];
+  const elements: ReactNode[] = [];
+  let listItems: ReactNode[] = [];
   let listType: 'ul' | 'ol' | null = null;
 
   const flushList = (index: number) => {
