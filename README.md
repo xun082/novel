@@ -40,6 +40,15 @@ pnpm dev
 
 项目默认运行在 [http://localhost:3001](http://localhost:3001)。
 
+### 环境变量（必填）
+
+`src/app/api/_lib/rwkv.ts` 现在只要求配置上游地址和密码，其他预算参数使用代码内固定值。
+
+```bash
+RWKV_UPSTREAM_URL=http://154.37.222.49:8193/big_batch/completions
+RWKV_UPSTREAM_PASSWORD=rwkv-7b13b-fyrik-13b
+```
+
 ## 目录说明（核心）
 
 - `src/app/page.tsx`：主界面与两轮生成流程编排

@@ -106,18 +106,13 @@ export default function Home() {
   const [novelInput, setNovelInput] = useState("玄幻，升级流，主角成长线清晰，含宗门与秘境线。");
   const [isGenerating, setIsGenerating] = useState(false);
   const [currentStep, setCurrentStep] = useState("");
-  const [launchPrompt] = useState<string>(() => consumeLaunchPrompt());
+  const [storageReady, setStorageReady] = useState(false);
   const outlineGenerationLockRef = useRef(false);
   const chapterGenerationLockRef = useRef(false);
 
-  const [outlines, setOutlines] = useState<Outline[]>(() => {
-    if (launchPrompt.trim()) {
-      return createOutlinePlaceholders(OUTLINE_TOTAL);
-    }
-    const cached = readPersistedOutlines() as Outline[];
-    if (cached.length > 0) return cached;
-    return createOutlinePlaceholders(OUTLINE_TOTAL);
-  });
+  const [outlines, setOutlines] = useState<Outline[]>(() =>
+    createOutlinePlaceholders(OUTLINE_TOTAL),
+  );
 
   useEffect(() => {
     // Backward compatibility: strip legacy query params from older shared links.
@@ -134,8 +129,9 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (!storageReady) return;
     persistOutlines(outlines);
-  }, [outlines]);
+  }, [outlines, storageReady]);
 
   const extractJSON = (text: string): Record<string, unknown> | null => {
     if (!text || text.trim().length === 0) return null;
@@ -330,11 +326,21 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (!launchPrompt.trim()) return;
-    setNovelInput(launchPrompt);
-    void generateOutlinesAndChapters(launchPrompt);
+    const launchPrompt = consumeLaunchPrompt().trim();
+    if (launchPrompt) {
+      setNovelInput(launchPrompt);
+      setStorageReady(true);
+      void generateOutlinesAndChapters(launchPrompt);
+      return;
+    }
+
+    const cached = readPersistedOutlines() as Outline[];
+    if (cached.length > 0) {
+      setOutlines(cached);
+    }
+    setStorageReady(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [launchPrompt]);
+  }, []);
 
   const openOutlineDetails = (outline: Outline) => {
     if (!outline.rawContent.trim()) {

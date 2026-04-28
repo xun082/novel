@@ -1,5 +1,11 @@
-const UPSTREAM = "http://154.37.222.49:8193/big_batch/completions";
-const DEFAULT_PASSWORD = "rwkv-7b13b-fyrik-13b";
+function mustEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`Missing required env: ${name}`);
+  return value;
+}
+
+const UPSTREAM = mustEnv("RWKV_UPSTREAM_URL");
+const DEFAULT_PASSWORD = mustEnv("RWKV_UPSTREAM_PASSWORD");
 const DEFAULT_MAX_TOKENS = 2000;
 /**
  * 上游 /big_batch/completions 的真正瓶颈：
