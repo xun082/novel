@@ -16,58 +16,58 @@ interface PromptPreset {
 
 const PROMPT_PRESETS: PromptPreset[] = [
   {
-    label: "玄幻修仙",
-    tagline: "升级流 · 宗门秘境",
-    prompt: "玄幻修仙，升级流，主角资质平平却另辟蹊径，含宗门、秘境、古神血脉。",
+    label: "寒门医女",
+    tagline: "出身卑微 · 医术觉醒",
+    prompt: "女主出身寒门药铺学徒，长期被轻视，意外觉醒古医传承后在救人中成长逆袭；每2-3场出现一次局势反转，突出仁心与责任。",
     accent: "from-sky-500/90 to-cyan-500/90",
   },
   {
-    label: "都市职场",
-    tagline: "商战 · 逆袭",
-    prompt: "都市现代，职场商战，主角从底层实习生起步，步步为营直面家族企业博弈。",
+    label: "底层店员",
+    tagline: "小人物 · 商业天赋觉醒",
+    prompt: "主角是普通商场店员，屡遭压制，意外激活超强经营洞察力后带队逆袭；反转围绕职场公平与团队成长展开，节奏紧凑。",
     accent: "from-emerald-500/90 to-teal-500/90",
   },
   {
-    label: "末世生存",
-    tagline: "丧尸 · 硬核",
-    prompt: "末世丧尸题材，资源稀缺、人性博弈，主角带领小队穿越废土寻找避难所。",
+    label: "草根觉醒",
+    tagline: "出身低微 · 能力觉醒",
+    prompt: "主角出身普通、长期被轻视，意外觉醒稀有能力后在规则中成长逆袭；能力越强责任越大，要求每2-3场出现一次局势反转，突出努力、守护与自我成长。",
     accent: "from-rose-500/90 to-orange-500/90",
   },
   {
-    label: "硬核科幻",
-    tagline: "星海 · 指挥官",
-    prompt: "硬科幻，星际舰队指挥官视角，跨星系战争，含外星文明与高维武器设定。",
+    label: "街头少年",
+    tagline: "被看不起 · 战术觉醒",
+    prompt: "主角来自普通街区，因一次意外觉醒战术预判能力，从替补一路成长为核心；每集有挑战与反转，强调奋斗与团队协作。",
     accent: "from-indigo-500/90 to-purple-500/90",
   },
   {
-    label: "悬疑推理",
-    tagline: "连环案 · 烧脑反转",
-    prompt: "现代悬疑推理，连环凶杀案，主角是天才犯罪心理学家，双线叙事层层反转。",
+    label: "外卖骑手",
+    tagline: "平凡生活 · 感知觉醒",
+    prompt: "主角是城市外卖骑手，偶然获得短时风险感知能力，在一次次危机中守护他人并提升自己；反转密集但导向温暖正向。",
     accent: "from-slate-600/90 to-zinc-600/90",
   },
   {
-    label: "古代权谋",
-    tagline: "朝堂 · 党争",
-    prompt: "古代宫廷权谋，寒门状元入局朝堂，党争、夺嫡、边疆战事交织推进。",
+    label: "工地学徒",
+    tagline: "基层起步 · 技能开挂",
+    prompt: "主角从工地学徒做起，被各方质疑，后觉醒工程推演天赋并解决连环难题；每2-3场有一次能力兑现，突出实干与担当。",
     accent: "from-amber-500/90 to-yellow-600/90",
   },
   {
-    label: "仙侠武侠",
-    tagline: "江湖 · 血海深仇",
-    prompt: "传统仙侠武侠，江湖恩怨，主角背负灭门之仇，拜师习武逐步揭开身世谜团。",
+    label: "边城庶子",
+    tagline: "出身普通 · 谋略觉醒",
+    prompt: "古装短剧，边城小吏之子长期被忽视，意外觉醒谋略天赋后在家国危机中崭露头角；反转围绕守城、护民与成长推进。",
     accent: "from-fuchsia-500/90 to-pink-500/90",
   },
   {
-    label: "异世冒险",
-    tagline: "穿越 · 魔法职业",
-    prompt: "异世界穿越，奇幻大陆含职业与魔法系统，主角组队探索迷宫秘境并揭露神祇阴谋。",
+    label: "乡镇教师",
+    tagline: "默默无闻 · 教学天赋觉醒",
+    prompt: "主角是乡镇新教师，资源匮乏且不被看好，觉醒因材施教能力后带学生逆风成长；每集结尾留希望型悬念，持续吸引追更。",
     accent: "from-lime-500/90 to-green-600/90",
   },
 ];
 
 export default function HomePage() {
   const router = useRouter();
-  const [novelInput, setNovelInput] = useState("玄幻，升级流，主角成长线清晰，含宗门与秘境线。");
+  const [novelInput, setNovelInput] = useState("主角出身普通被轻视，意外觉醒独特能力后一路成长逆袭；开场有冲突，3场内有反转，结尾留悬念，价值观正向。");
   const [navigating, setNavigating] = useState(false);
 
   const openOutlinesWorkspace = (promptOverride?: string) => {
@@ -86,10 +86,10 @@ export default function HomePage() {
         <div className="w-full max-w-3xl">
           <div className="mb-6 text-center">
             <h1 className="text-3xl font-semibold tracking-tight text-foreground">
-              选一种风格，开始写你的小说
+              选一个爆点，直接开写短剧
             </h1>
             <p className="mt-2 text-sm text-muted-foreground">
-              首页只用于输入题材；进入大纲工作台后才会开始并发生成与续写。
+              首页先定题材和钩子；进大纲工作台后再并发生成剧情与续写。
             </p>
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
