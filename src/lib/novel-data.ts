@@ -101,7 +101,12 @@ const parseRecord = (raw: string): Record<string, unknown> | null => {
 export const isChapterOutputComplete = (value: string): boolean => {
   const text = value.trim();
   if (!text) return false;
-  return !text.includes("生成中...") && !text.includes("扩写中...") && !text.includes("生成失败");
+  return (
+    !text.includes("生成中...") &&
+    !text.includes("扩写中...") &&
+    !text.includes("续写中") &&
+    !text.includes("生成失败")
+  );
 };
 
 export const isOutlineOutputComplete = (outline: Pick<NovelOutline, "rawContent" | "chapters">): boolean => {

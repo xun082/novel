@@ -147,14 +147,19 @@ const NODE_STYLES = [
 const isChapterDone = (content: string): boolean => {
   const text = content.trim();
   if (!text) return false;
-  return !text.includes("生成中...") && !text.includes("扩写中...") && !text.includes("生成失败");
+  return (
+    !text.includes("生成中...") &&
+    !text.includes("扩写中...") &&
+    !text.includes("续写中") &&
+    !text.includes("生成失败")
+  );
 };
 
 const getChapterContentPreview = (raw: string): { text: string; pending: boolean } => {
   const trimmed = (raw || "").trim();
   if (!trimmed) return { text: "", pending: false };
 
-  const pendingMatch = trimmed.match(/^(生成中|扩写中)\.\.\.\s*(?:\d+字)?\s*/);
+  const pendingMatch = trimmed.match(/^(生成中|扩写中|续写中)\.\.\.\s*(?:\d+字)?\s*/);
   const pending = Boolean(pendingMatch);
   const body = pending ? trimmed.slice(pendingMatch![0].length).trim() : trimmed;
   return { text: normalizeChapterContent(body), pending };

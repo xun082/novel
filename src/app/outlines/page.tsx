@@ -7,6 +7,7 @@ import { Loader2, Sparkles, Wand2 } from "lucide-react";
 import rwkvService from "@/services";
 import { OutlineCard } from "@/components/OutlineCard";
 import { consumeLaunchPrompt, persistOutlines, readPersistedOutlines } from "@/lib/novel-data";
+import { cn } from "@/lib/utils";
 
 interface Chapter {
   id: number;
@@ -90,7 +91,15 @@ const PROMPT_PRESETS: PromptPreset[] = [
 const isStableContent = (value: string): boolean => {
   const text = value.trim();
   if (!text) return false;
-  return !text.includes("生成中...") && !text.includes("扩写中...") && !text.includes("生成失败");
+  if (
+    text.includes("生成中...") ||
+    text.includes("扩写中...") ||
+    text.includes("续写中") ||
+    text.includes("生成失败")
+  ) {
+    return false;
+  }
+  return true;
 };
 
 const createOutlinePlaceholders = (count: number): Outline[] =>
@@ -105,7 +114,6 @@ const createOutlinePlaceholders = (count: number): Outline[] =>
 export default function Home() {
   const [novelInput, setNovelInput] = useState("玄幻，升级流，主角成长线清晰，含宗门与秘境线。");
   const [isGenerating, setIsGenerating] = useState(false);
-  const [currentStep, setCurrentStep] = useState("");
   const [storageReady, setStorageReady] = useState(false);
   const outlineGenerationLockRef = useRef(false);
   const chapterGenerationLockRef = useRef(false);
@@ -272,7 +280,6 @@ export default function Home() {
     if (!promptText) return;
     outlineGenerationLockRef.current = true;
     setIsGenerating(true);
-    setCurrentStep(`第一轮：正在并发生成 ${OUTLINE_TOTAL} 份小说大纲（含章节梗概）...`);
 
     const placeholders = createOutlinePlaceholders(OUTLINE_TOTAL);
     setOutlines(placeholders);
@@ -307,17 +314,9 @@ export default function Home() {
         };
       });
       setOutlines(finalizedOutlines);
-
-      const totalChaptersPlanned = finalizedOutlines.reduce(
-        (sum, outline) => sum + outline.chapters.length,
-        0,
-      );
-      setCurrentStep(
-        `第一轮完成：${finalizedOutlines.length} 份大纲、共 ${totalChaptersPlanned} 章梗概。先点击「续写全部」生成正文，全部完成后可新标签页查看详情。`,
-      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "未知错误";
-      setCurrentStep(`大纲生成失败：${message}`);
+      window.alert(`大纲生成失败：${message}`);
       setOutlines(createOutlinePlaceholders(OUTLINE_TOTAL));
     } finally {
       outlineGenerationLockRef.current = false;
@@ -344,9 +343,7 @@ export default function Home() {
 
   const openOutlineDetails = (outline: Outline) => {
     if (!outline.rawContent.trim()) {
-      setCurrentStep(
-        `《${outline.title}》仍在生成中，请稍后重试。`,
-      );
+      window.alert(`《${outline.title}》仍在生成中，请稍后重试。`);
       return;
     }
 
@@ -354,10 +351,9 @@ export default function Home() {
     const nextPath = `/outline/${outline.id}`;
     const popup = window.open(nextPath, "_blank", "noopener,noreferrer");
     if (!popup) {
-      setCurrentStep("浏览器拦截了新标签页，请允许弹窗后重试（当前生成页已保留）。");
+      window.alert("浏览器拦截了新标签页，请允许弹窗后重试（当前生成页已保留）。");
       return;
     }
-    setCurrentStep(`已在新标签页打开《${outline.title}》详情页。`);
   };
 
   const applyChapterUpdate = (
@@ -392,7 +388,9 @@ export default function Home() {
     );
 
     if (tasks.length === 0) {
-      setCurrentStep("第二轮已完成，无需继续续写。");
+      window.alert(
+        "没有需要续写的章节：各章正文已就绪，或章节梗概仍为空/为「待生成」。若刚中断过生成，请点「重置」后重新生成大纲。",
+      );
       return;
     }
 
@@ -400,11 +398,6 @@ export default function Home() {
 
     setIsGenerating(true);
     chapterGenerationLockRef.current = true;
-    setCurrentStep(
-      `第二轮：并发续写 ${tasks.length} 章（${snapshot.length} 份大纲 × 约 ${DEFAULT_CHAPTER_COUNT} 章，流式输出）...`,
-    );
-
-    const startedTasks = new Set<number>();
 
     try {
       const rawContents = await rwkvService.generateChaptersByTasks(
@@ -421,12 +414,6 @@ export default function Home() {
         (taskIndex, content) => {
           const task = tasks[taskIndex];
           if (!task) return;
-          if (!startedTasks.has(taskIndex)) {
-            startedTasks.add(taskIndex);
-            setCurrentStep(
-              `第二轮续写中：已启动 ${startedTasks.size}/${tasks.length} 章`,
-            );
-          }
           const streamText = extractStreamingChapterText(content);
           const pending = streamText
             ? `${pendingLabel}...\n${streamText}`
@@ -435,23 +422,17 @@ export default function Home() {
         },
       );
 
-      let successCount = 0;
       tasks.forEach((task, taskIndex) => {
         const raw = rawContents[taskIndex] || "";
         const jsonData = extractJSON(raw);
         const finalContent = ((jsonData?.content as string) || raw || "").trim();
         if (finalContent) {
           applyChapterUpdate(task.outline.id, task.chapterIndex, finalContent);
-          successCount += 1;
         }
       });
-
-      setCurrentStep(
-        `第二轮续写完成：成功 ${successCount}/${tasks.length} 章。`,
-      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "未知错误";
-      setCurrentStep(`续写失败：${message}`);
+      window.alert(`续写失败：${message}`);
     } finally {
       chapterGenerationLockRef.current = false;
       setIsGenerating(false);
@@ -462,29 +443,13 @@ export default function Home() {
     outlineGenerationLockRef.current = false;
     chapterGenerationLockRef.current = false;
     setIsGenerating(false);
-    setCurrentStep("");
     setOutlines(createOutlinePlaceholders(OUTLINE_TOTAL));
   };
-
-  const globalTotalChapters = useMemo(
-    () => outlines.reduce((sum, outline) => sum + outline.chapters.length, 0),
-    [outlines],
-  );
-  const globalCompletedChapters = useMemo(
-    () =>
-      outlines.reduce(
-        (sum, outline) =>
-          sum + outline.chapters.filter((chapter) => isStableContent(chapter.content)).length,
-        0,
-      ),
-    [outlines],
-  );
 
   const outlinesReady = useMemo(
     () => outlines.some((outline) => outline.chapters.length > 0),
     [outlines],
   );
-  const progressText = `完成章节 ${globalCompletedChapters}/${globalTotalChapters || OUTLINE_TOTAL * DEFAULT_CHAPTER_COUNT}`;
 
   const isSecondRound = outlinesReady;
   const primaryButtonLabel = isGenerating
@@ -565,49 +530,55 @@ export default function Home() {
 
       </main>
 
-      <div className="pointer-events-none fixed bottom-2 left-1/2 z-30 w-[min(720px,calc(100vw-24px))] -translate-x-1/2">
-        <div className="pointer-events-auto rounded-xl border border-border/70 bg-card/85 px-2 py-1.5 shadow-[0_14px_45px_-24px_rgba(2,6,23,0.95)] backdrop-blur-xl">
-          <div className="flex items-center gap-1.5">
+      <div className="pointer-events-none fixed bottom-3 left-1/2 z-30 w-[min(720px,calc(100vw-24px))] -translate-x-1/2">
+        <div className="pointer-events-auto rounded-xl border border-border/70 bg-card/85 px-3 py-2.5 shadow-[0_14px_45px_-24px_rgba(2,6,23,0.95)] backdrop-blur-xl">
+          <div className="flex items-end gap-2">
             <Textarea
               value={novelInput}
               onChange={(e) => setNovelInput(e.target.value)}
-              placeholder="题材、世界观、主角设定..."
-              rows={1}
-              className="min-h-[32px] max-h-[72px] flex-1 resize-none overflow-y-auto rounded-md border border-border/60 bg-background/80 px-2 py-1 text-xs leading-5 shadow-none focus-visible:ring-0"
+              readOnly={isSecondRound}
+              placeholder={
+                isSecondRound
+                  ? "创建时的总设定（只读）；续写仅依据上方卡片内大纲与章节梗概"
+                  : "题材、世界观、主角设定..."
+              }
+              rows={2}
+              className={cn(
+                "min-h-18 max-h-36 flex-1 resize-none overflow-y-auto rounded-lg border border-border/60 bg-background/80 px-3 py-2.5 text-sm leading-relaxed shadow-none focus-visible:ring-0",
+                isSecondRound &&
+                  "cursor-not-allowed bg-muted/20 text-muted-foreground focus-visible:ring-0",
+              )}
             />
-            <Button variant="ghost" disabled={isGenerating} onClick={resetFlow} className="h-7 rounded-md px-2 text-xs">
+            <Button
+              variant="ghost"
+              disabled={isGenerating}
+              onClick={resetFlow}
+              className="h-9 shrink-0 rounded-md px-3 text-sm"
+            >
               重置
             </Button>
             <Button
               onClick={handlePrimaryAction}
               disabled={disablePrimaryButton}
-              className="h-7 rounded-full px-3 text-xs"
+              className="h-9 shrink-0 rounded-full px-4 text-sm"
             >
               {isGenerating ? (
                 <>
-                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                  <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
                   处理中
                 </>
               ) : isSecondRound ? (
                 <>
-                  <Wand2 className="mr-1 h-3.5 w-3.5" />
+                  <Wand2 className="mr-1.5 h-4 w-4" />
                   {primaryButtonLabel}
                 </>
               ) : (
                 <>
-                  <Sparkles className="mr-1 h-3.5 w-3.5" />
+                  <Sparkles className="mr-1.5 h-4 w-4" />
                   {primaryButtonLabel}
                 </>
               )}
             </Button>
-          </div>
-          <div className="mt-1 flex flex-wrap items-center justify-between gap-1.5 border-t border-border/60 pt-1">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-[11px] leading-4 text-muted-foreground">{progressText}</span>
-              {currentStep && (
-                <span className="max-w-[260px] truncate text-[11px] leading-4 text-muted-foreground">{currentStep}</span>
-              )}
-            </div>
           </div>
         </div>
       </div>

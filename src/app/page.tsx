@@ -120,22 +120,22 @@ export default function HomePage() {
         </div>
       </main>
 
-      <div className="pointer-events-none fixed bottom-2 left-1/2 z-30 w-[min(720px,calc(100vw-24px))] -translate-x-1/2">
-        <div className="pointer-events-auto rounded-xl border border-border/70 bg-card/85 px-2 py-1.5 shadow-[0_14px_45px_-24px_rgba(2,6,23,0.95)] backdrop-blur-xl">
-          <div className="flex items-center gap-1.5">
+      <div className="pointer-events-none fixed bottom-3 left-1/2 z-30 w-[min(720px,calc(100vw-24px))] -translate-x-1/2">
+        <div className="pointer-events-auto rounded-xl border border-border/70 bg-card/85 px-3 py-2.5 shadow-[0_14px_45px_-24px_rgba(2,6,23,0.95)] backdrop-blur-xl">
+          <div className="flex items-end gap-2">
             <Textarea
               value={novelInput}
               onChange={(e) => setNovelInput(e.target.value)}
               placeholder="题材、世界观、主角设定..."
-              rows={1}
-              className="min-h-[32px] max-h-[72px] flex-1 resize-none overflow-y-auto rounded-md border border-border/60 bg-background/80 px-2 py-1 text-xs leading-5 shadow-none focus-visible:ring-0"
+              rows={2}
+              className="min-h-18 max-h-36 flex-1 resize-none overflow-y-auto rounded-lg border border-border/60 bg-background/80 px-3 py-2.5 text-sm leading-relaxed shadow-none focus-visible:ring-0"
             />
             <Button
               onClick={() => openOutlinesWorkspace()}
               disabled={navigating || !novelInput.trim()}
-              className="h-7 rounded-full px-3 text-xs"
+              className="h-9 shrink-0 rounded-full px-4 text-sm"
             >
-              <Sparkles className="mr-1 h-3.5 w-3.5" />
+              <Sparkles className="mr-1.5 h-4 w-4" />
               {navigating ? "进入中" : "进入大纲工作台"}
             </Button>
           </div>
