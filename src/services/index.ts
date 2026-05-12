@@ -6,6 +6,8 @@
  *   - POST /api/expand    对现有章节正文并发扩写
  */
 
+import { rwkvCredentialsForApiBody } from "@/lib/rwkv-client-settings";
+
 // ========== 类型定义 ==========
 
 export interface RWKVConfig {
@@ -102,7 +104,10 @@ class RWKVService {
     payload: Record<string, unknown>,
     onUpdate?: (index: number, content: string) => void,
   ): Promise<string[]> {
-    const finalPayload: Record<string, unknown> = { ...payload };
+    const finalPayload: Record<string, unknown> = {
+      ...payload,
+      ...rwkvCredentialsForApiBody(),
+    };
     if (typeof this.maxTokens === "number") {
       finalPayload.maxTokens = this.maxTokens;
     }

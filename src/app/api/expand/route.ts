@@ -4,6 +4,7 @@ import {
   callUpstreamStream,
   ExpandTaskInput,
   NO_CACHE_HEADERS,
+  upstreamCredentialsFromPayload,
 } from "../_lib/rwkv";
 
 export const dynamic = "force-dynamic";
@@ -59,5 +60,6 @@ export async function POST(req: NextRequest) {
   return callUpstreamStream({
     contents: prompts,
     maxTokens: payload.maxTokens ?? 1000,
+    ...upstreamCredentialsFromPayload(payload as unknown as Record<string, unknown>),
   });
 }

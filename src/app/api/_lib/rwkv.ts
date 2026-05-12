@@ -1,12 +1,15 @@
-function mustEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing required env: ${name}`);
-  return value;
-}
+import {
+  rwkvResolvedUrlSchema,
+  upstreamCallOptsSchema,
+} from "./rwkv-schema";
 
-const UPSTREAM = mustEnv("RWKV_UPSTREAM_URL");
-const DEFAULT_PASSWORD = mustEnv("RWKV_UPSTREAM_PASSWORD");
+/** 环境变量默认；请求级覆盖经 zod 校验后优先 */
+const DEFAULT_UPSTREAM_URL = process.env.RWKV_UPSTREAM_URL ?? "";
+const DEFAULT_UPSTREAM_PASSWORD = process.env.RWKV_UPSTREAM_PASSWORD ?? "";
+
 const DEFAULT_MAX_TOKENS = 2000;
+/** 默认 stop 序列：与 RWKV 多轮 User/Assistant 分界一致 */
+const DEFAULT_STOP_TOKENS: (number | string)[] = ["\nUser:"];
 /**
  * 上游 /big_batch/completions 的真正瓶颈：
  *
@@ -48,8 +51,23 @@ export interface UpstreamOptions {
   maxTokens?: number;
   temperature?: number;
   chunkSize?: number;
-  stopTokens?: number[];
+  stopTokens?: (number | string)[];
+  /** 请求级覆盖，优先于 RWKV_UPSTREAM_PASSWORD */
   password?: string;
+  /** 请求级覆盖，优先于 RWKV_UPSTREAM_URL */
+  upstreamUrl?: string;
+}
+
+/** 从 POST JSON 根级读取可选上游覆盖（与 {@link UpstreamOptions} 同名，由 zod 在 callUpstreamStream 内校验） */
+export function upstreamCredentialsFromPayload(
+  payload: Record<string, unknown>,
+): Pick<UpstreamOptions, "upstreamUrl" | "password"> {
+  const o: Pick<UpstreamOptions, "upstreamUrl" | "password"> = {};
+  if (typeof payload.upstreamUrl === "string" && payload.upstreamUrl !== "")
+    o.upstreamUrl = payload.upstreamUrl;
+  if (typeof payload.password === "string" && payload.password !== "")
+    o.password = payload.password;
+  return o;
 }
 
 function resolveMaxTokens(contents: string[], opts: UpstreamOptions): number {
@@ -70,17 +88,24 @@ function resolveMaxTokens(contents: string[], opts: UpstreamOptions): number {
   return Math.min(requested, perPromptBudget);
 }
 
-function buildUpstreamBody(contents: string[], opts: UpstreamOptions): string {
+function buildUpstreamBody(
+  contents: string[],
+  opts: UpstreamOptions,
+  password: string | undefined,
+): string {
   const maxTokens = resolveMaxTokens(contents, opts);
-  return JSON.stringify({
+  const body: Record<string, unknown> = {
     contents,
     max_tokens: maxTokens,
-    stop_tokens: opts.stopTokens ?? [0],
+    stop_tokens: opts.stopTokens ?? DEFAULT_STOP_TOKENS,
     temperature: opts.temperature ?? 0.9,
     chunk_size: opts.chunkSize ?? 8,
     stream: true,
-    password: opts.password ?? DEFAULT_PASSWORD,
-  });
+  };
+  if (password !== undefined && password !== "") {
+    body.password = password;
+  }
+  return JSON.stringify(body);
 }
 
 const LOG_PROGRESS_INTERVAL_MS = 5000;
@@ -96,23 +121,67 @@ const LOG_PROGRESS_INTERVAL_MS = 5000;
  *   - 上游/下游任何一端断开，都会把另一端一起关掉，避免 ERR_INVALID_STATE 和算力浪费。
  */
 export async function callUpstreamStream(opts: UpstreamOptions): Promise<Response> {
-  const total = opts.contents.length;
+  const parsedOpts = upstreamCallOptsSchema.safeParse(opts);
+  if (!parsedOpts.success) {
+    return new Response(
+      JSON.stringify({
+        error: "invalid_upstream_options",
+        issues: parsedOpts.error.issues,
+      }),
+      {
+        status: 400,
+        headers: { "Content-Type": "application/json", ...NO_CACHE_HEADERS },
+      },
+    );
+  }
+
+  const v = parsedOpts.data;
+  const url = v.upstreamUrl ?? DEFAULT_UPSTREAM_URL;
+  const passwordRaw = v.password ?? DEFAULT_UPSTREAM_PASSWORD;
+  const fetchPassword =
+    typeof passwordRaw === "string" && passwordRaw.length > 0 ? passwordRaw : undefined;
+
+  const urlResolved = rwkvResolvedUrlSchema.safeParse({ url });
+  if (!urlResolved.success) {
+    return new Response(
+      JSON.stringify({
+        error: "invalid_upstream_credentials",
+        issues: urlResolved.error.issues,
+      }),
+      {
+        status: 503,
+        headers: { "Content-Type": "application/json", ...NO_CACHE_HEADERS },
+      },
+    );
+  }
+
+  const { url: fetchUrl } = urlResolved.data;
+
+  const bodyOpts: UpstreamOptions = {
+    contents: v.contents,
+    maxTokens: v.maxTokens,
+    temperature: v.temperature,
+    chunkSize: v.chunkSize,
+    stopTokens: v.stopTokens,
+  };
+
+  const total = v.contents.length;
   const startedAt = Date.now();
   const requestId = Math.random().toString(36).slice(2, 8);
-  const effectiveMaxTokens = resolveMaxTokens(opts.contents, opts);
+  const effectiveMaxTokens = resolveMaxTokens(v.contents, bodyOpts);
 
   // 输入 prompt 规模统计（字符，用于粗略 token 估算：中文 ~1.5 char/token）
   let promptTotalChars = 0;
   let promptMin = Infinity;
   let promptMax = 0;
-  for (const c of opts.contents) {
+  for (const c of v.contents) {
     promptTotalChars += c.length;
     if (c.length < promptMin) promptMin = c.length;
     if (c.length > promptMax) promptMax = c.length;
   }
   const promptAvg = Math.round(promptTotalChars / Math.max(1, total));
-  const body = buildUpstreamBody(opts.contents, opts);
-  const estInputTokens = estimateInputTokens(opts.contents);
+  const body = buildUpstreamBody(v.contents, bodyOpts, fetchPassword);
+  const estInputTokens = estimateInputTokens(v.contents);
   const estOutputTokens = total * effectiveMaxTokens;
   const estCombined = estInputTokens + estOutputTokens;
 
@@ -127,7 +196,7 @@ export async function callUpstreamStream(opts: UpstreamOptions): Promise<Respons
 
   let upstream: Response;
   try {
-    upstream = await fetch(UPSTREAM, {
+    upstream = await fetch(fetchUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -257,7 +326,7 @@ export async function callUpstreamStream(opts: UpstreamOptions): Promise<Respons
               `[rwkv:${requestId}] 已保存失败请求体到 ${path}，可用脚本重放复现：`,
             );
             console.error(
-              `[rwkv:${requestId}]   curl -sS -X POST '${UPSTREAM}' -H 'Content-Type: application/json' --data @${path} -N | head`,
+              `[rwkv:${requestId}]   curl -sS -X POST '${fetchUrl}' -H 'Content-Type: application/json' --data @${path} -N | head`,
             );
           } catch (e) {
             console.error(`[rwkv:${requestId}] dump body failed`, e);

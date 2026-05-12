@@ -14,6 +14,7 @@ import {
   readPersistedOutlines,
 } from "@/lib/novel-data";
 import { cn } from "@/lib/utils";
+import { RwkvProductionUpstreamSettings } from "@/components/RwkvProductionUpstreamSettings";
 
 interface Chapter {
   id: number;
@@ -540,6 +541,7 @@ export default function Home() {
 
   return (
     <div className="min-h-screen w-full min-w-0 overflow-x-hidden bg-[radial-gradient(circle_at_10%_20%,rgba(56,189,248,0.14),transparent_45%),radial-gradient(circle_at_90%_10%,rgba(236,72,153,0.12),transparent_45%),linear-gradient(180deg,#020617,#030712_48%,#0b1120)]">
+      <RwkvProductionUpstreamSettings />
       <main className="w-full pb-36">
         {!outlinesReady && !isGenerating ? (
           <section className="flex min-h-[calc(100vh-76px)] w-full items-center justify-center px-4">
