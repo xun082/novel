@@ -3,10 +3,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Loader2, Sparkles, Wand2 } from "lucide-react";
+import { Loader2, RefreshCw, Sparkles, Wand2 } from "lucide-react";
 import rwkvService from "@/services";
 import { OutlineCard } from "@/components/OutlineCard";
-import { consumeLaunchPrompt, persistOutlines, readPersistedOutlines } from "@/lib/novel-data";
+import {
+  clearLaunchSessionStorage,
+  clearPersistedOutlines,
+  peekLaunchSession,
+  persistOutlines,
+  readPersistedOutlines,
+} from "@/lib/novel-data";
 import { cn } from "@/lib/utils";
 
 interface Chapter {
@@ -91,14 +97,11 @@ const PROMPT_PRESETS: PromptPreset[] = [
 const isStableContent = (value: string): boolean => {
   const text = value.trim();
   if (!text) return false;
-  if (
-    text.includes("生成中...") ||
-    text.includes("扩写中...") ||
-    text.includes("续写中") ||
-    text.includes("生成失败")
-  ) {
+  if (text.includes("生成中...") || text.includes("扩写中...") || text.includes("生成失败")) {
     return false;
   }
+  // 仅把「续写」流式前缀视为进行中，避免正文里出现「续写」字样被误判
+  if (text.startsWith("续写中")) return false;
   return true;
 };
 
@@ -110,6 +113,15 @@ const createOutlinePlaceholders = (count: number): Outline[] =>
     chapters: [],
     rawContent: "",
   }));
+
+const stripSeedQueryFromUrl = (): void => {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has("seed")) return;
+  url.searchParams.delete("seed");
+  const q = url.searchParams.toString();
+  window.history.replaceState(null, "", `${url.pathname}${q ? `?${q}` : ""}${url.hash}`);
+};
 
 export default function Home() {
   const [novelInput, setNovelInput] = useState("玄幻，升级流，主角成长线清晰，含宗门与秘境线。");
@@ -278,6 +290,7 @@ export default function Home() {
 
     const promptText = (overridePrompt ?? novelInput).trim();
     if (!promptText) return;
+    stripSeedQueryFromUrl();
     outlineGenerationLockRef.current = true;
     setIsGenerating(true);
 
@@ -325,11 +338,37 @@ export default function Home() {
   };
 
   useEffect(() => {
-    const launchPrompt = consumeLaunchPrompt().trim();
-    if (launchPrompt) {
-      setNovelInput(launchPrompt);
+    if (typeof window === "undefined") return;
+
+    const params = new URLSearchParams(window.location.search);
+    const seed = params.get("seed");
+    if (seed) {
+      let prompt = "";
+      try {
+        prompt = decodeURIComponent(seed);
+      } catch {
+        stripSeedQueryFromUrl();
+      }
+      if (prompt.trim()) {
+        setNovelInput(prompt);
+        setOutlines(createOutlinePlaceholders(OUTLINE_TOTAL));
+        clearPersistedOutlines();
+        clearLaunchSessionStorage();
+        setStorageReady(true);
+        return;
+      }
+    }
+
+    const session = peekLaunchSession();
+    if (session?.prompt.trim()) {
+      setNovelInput(session.prompt);
+      setOutlines(createOutlinePlaceholders(OUTLINE_TOTAL));
+      clearPersistedOutlines();
+      clearLaunchSessionStorage();
       setStorageReady(true);
-      void generateOutlinesAndChapters(launchPrompt);
+      if (session.autoGenerate) {
+        void generateOutlinesAndChapters(session.prompt);
+      }
       return;
     }
 
@@ -374,7 +413,7 @@ export default function Home() {
     });
   };
 
-  const generateAllChapterContents = async () => {
+  const generateAllChapterContents = async (regenerateAll = false) => {
     if (chapterGenerationLockRef.current || outlineGenerationLockRef.current) return;
 
     const snapshot = outlines;
@@ -383,14 +422,18 @@ export default function Home() {
         .map((chapter, chapterIndex) => ({ outline, chapter, chapterIndex }))
         .filter(({ chapter }) => {
           const outlineText = chapter.outline?.trim();
-          return Boolean(outlineText) && outlineText !== "待生成" && !isStableContent(chapter.content);
+          if (!outlineText || outlineText === "待生成") return false;
+          if (regenerateAll) return true;
+          return !isStableContent(chapter.content);
         }),
     );
 
     if (tasks.length === 0) {
-      window.alert(
-        "没有需要续写的章节：各章正文已就绪，或章节梗概仍为空/为「待生成」。若刚中断过生成，请点「重置」后重新生成大纲。",
-      );
+      if (!regenerateAll) {
+        window.alert(
+          "没有需要续写的章节：各章正文已就绪，或章节梗概仍为空/为「待生成」。若刚中断过生成，请点「重置」后重新生成大纲。",
+        );
+      }
       return;
     }
 
@@ -443,6 +486,8 @@ export default function Home() {
     outlineGenerationLockRef.current = false;
     chapterGenerationLockRef.current = false;
     setIsGenerating(false);
+    stripSeedQueryFromUrl();
+    clearPersistedOutlines();
     setOutlines(createOutlinePlaceholders(OUTLINE_TOTAL));
   };
 
@@ -451,19 +496,38 @@ export default function Home() {
     [outlines],
   );
 
+  const allChapterBodiesComplete = useMemo(() => {
+    if (!outlines.some((o) => o.chapters.length > 0)) return false;
+
+    const chaptersNeedingWork = outlines.flatMap((outline) =>
+      outline.chapters.filter((chapter) => {
+        const outlineText = chapter.outline?.trim();
+        return Boolean(outlineText) && outlineText !== "待生成" && !isStableContent(chapter.content);
+      }),
+    );
+
+    const hasAnyStableChapter = outlines.some((o) =>
+      o.chapters.some((c) => isStableContent(c.content)),
+    );
+
+    return chaptersNeedingWork.length === 0 && hasAnyStableChapter;
+  }, [outlines]);
+
   const isSecondRound = outlinesReady;
   const primaryButtonLabel = isGenerating
     ? "处理中"
     : !isSecondRound
       ? "生成大纲"
-      : "续写全部";
+      : allChapterBodiesComplete
+        ? "重新生成"
+        : "续写全部";
   const disablePrimaryButton =
     isGenerating || (!isSecondRound && !novelInput.trim());
 
   const handlePrimaryAction = () => {
     if (isGenerating) return;
     if (isSecondRound) {
-      void generateAllChapterContents();
+      void generateAllChapterContents(allChapterBodiesComplete);
       return;
     }
     void generateOutlinesAndChapters();
@@ -472,12 +536,11 @@ export default function Home() {
   const handlePresetSelect = (prompt: string) => {
     if (isGenerating) return;
     setNovelInput(prompt);
-    void generateOutlinesAndChapters(prompt);
   };
 
   return (
-    <div className="min-h-screen w-screen overflow-x-hidden bg-[radial-gradient(circle_at_10%_20%,rgba(56,189,248,0.14),transparent_45%),radial-gradient(circle_at_90%_10%,rgba(236,72,153,0.12),transparent_45%),linear-gradient(180deg,#020617,#030712_48%,#0b1120)]">
-      <main className="w-full pb-16">
+    <div className="min-h-screen w-full min-w-0 overflow-x-hidden bg-[radial-gradient(circle_at_10%_20%,rgba(56,189,248,0.14),transparent_45%),radial-gradient(circle_at_90%_10%,rgba(236,72,153,0.12),transparent_45%),linear-gradient(180deg,#020617,#030712_48%,#0b1120)]">
+      <main className="w-full pb-36">
         {!outlinesReady && !isGenerating ? (
           <section className="flex min-h-[calc(100vh-76px)] w-full items-center justify-center px-4">
             <div className="w-full max-w-5xl">
@@ -486,7 +549,8 @@ export default function Home() {
                   选一种风格，开始写你的小说
                 </h1>
                 <p className="mt-2 text-sm text-muted-foreground">
-                  点击任意预设即可一键并发生成 {OUTLINE_TOTAL} 份 {DEFAULT_CHAPTER_COUNT} 章的大纲；也可以在下方输入自定义需求。
+                  点预设会把文案填到底栏；确认后点「生成大纲」并发生成 {OUTLINE_TOTAL} 份 {DEFAULT_CHAPTER_COUNT}{" "}
+                  章大纲；也可直接改底栏再生成。
                 </p>
               </div>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
@@ -517,7 +581,7 @@ export default function Home() {
             </div>
           </section>
         ) : (
-          <section className="grid h-[calc(100vh-76px)] grid-cols-5 grid-rows-2 items-stretch gap-3 p-3">
+          <section className="relative z-0 grid min-h-0 h-[calc(100vh-7.5rem)] grid-cols-5 grid-rows-2 items-stretch gap-3 p-3">
             {outlines.map((outline) => (
               <OutlineCard
                 key={outline.id}
@@ -530,9 +594,9 @@ export default function Home() {
 
       </main>
 
-      <div className="pointer-events-none fixed bottom-3 left-1/2 z-30 w-[min(720px,calc(100vw-24px))] -translate-x-1/2">
-        <div className="pointer-events-auto rounded-xl border border-border/70 bg-card/85 px-3 py-2.5 shadow-[0_14px_45px_-24px_rgba(2,6,23,0.95)] backdrop-blur-xl">
-          <div className="flex items-end gap-2">
+      <div className="pointer-events-none fixed bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] left-1/2 z-50 w-[min(720px,calc(100%-24px))] max-w-full -translate-x-1/2">
+        <div className="pointer-events-auto max-w-full overflow-x-hidden rounded-xl border border-border/80 bg-card/95 px-3 py-2.5 shadow-[0_14px_45px_-24px_rgba(2,6,23,0.95)] ring-1 ring-border/30 backdrop-blur-xl">
+          <div className="flex min-w-0 max-w-full items-end gap-2 overflow-x-hidden">
             <Textarea
               value={novelInput}
               onChange={(e) => setNovelInput(e.target.value)}
@@ -544,9 +608,9 @@ export default function Home() {
               }
               rows={2}
               className={cn(
-                "min-h-18 max-h-36 flex-1 resize-none overflow-y-auto rounded-lg border border-border/60 bg-background/80 px-3 py-2.5 text-sm leading-relaxed shadow-none focus-visible:ring-0",
+                "min-h-18 max-h-36 min-w-0 flex-1 basis-0 resize-none overflow-y-auto overflow-x-hidden rounded-lg border border-border/70 bg-background/90 px-3 py-2.5 text-sm leading-relaxed text-foreground shadow-none focus-visible:ring-1 focus-visible:ring-ring/40",
                 isSecondRound &&
-                  "cursor-not-allowed bg-muted/20 text-muted-foreground focus-visible:ring-0",
+                  "cursor-not-allowed bg-muted/40 text-foreground/90 ring-1 ring-border/60 focus-visible:ring-0",
               )}
             />
             <Button
@@ -569,7 +633,11 @@ export default function Home() {
                 </>
               ) : isSecondRound ? (
                 <>
-                  <Wand2 className="mr-1.5 h-4 w-4" />
+                  {allChapterBodiesComplete && !isGenerating ? (
+                    <RefreshCw className="mr-1.5 h-4 w-4" />
+                  ) : (
+                    <Wand2 className="mr-1.5 h-4 w-4" />
+                  )}
                   {primaryButtonLabel}
                 </>
               ) : (

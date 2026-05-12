@@ -150,7 +150,7 @@ const isChapterDone = (content: string): boolean => {
   return (
     !text.includes("生成中...") &&
     !text.includes("扩写中...") &&
-    !text.includes("续写中") &&
+    !text.startsWith("续写中") &&
     !text.includes("生成失败")
   );
 };
@@ -254,7 +254,7 @@ export function OutlineCard({
                       <div className="flex items-start justify-between gap-2">
                         <p
                           className={[
-                            "break-words text-sm font-semibold",
+                            "wrap-break-word text-sm font-semibold",
                             nodeStyle.title,
                           ].join(" ")}
                         >
@@ -274,7 +274,7 @@ export function OutlineCard({
                         )}
                       </div>
                       {contentPreview ? (
-                        <p className="mt-1 whitespace-pre-wrap break-words text-[13px] leading-6 text-foreground/85">
+                        <p className="mt-1 whitespace-pre-wrap wrap-break-word text-[13px] leading-6 text-foreground/85">
                           {contentPreview}
                         </p>
                       ) : (

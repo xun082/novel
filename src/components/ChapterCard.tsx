@@ -24,7 +24,7 @@ export function ChapterCard({ chapter, isGenerating }: ChapterCardProps) {
   const isPendingText =
     chapter.content.includes("生成中...") ||
     chapter.content.includes("扩写中...") ||
-    chapter.content.includes("续写中");
+    chapter.content.startsWith("续写中");
   const contentLength = content.length;
   const shouldCollapse = contentLength > 360 && !isPendingText;
   const preview = !expanded && shouldCollapse ? `${content.slice(0, 360)}...` : content;
@@ -66,7 +66,7 @@ export function ChapterCard({ chapter, isGenerating }: ChapterCardProps) {
                 isPendingText ? "max-h-96 overflow-y-auto" : "",
               ].join(" ")}
             >
-              <div className="whitespace-pre-wrap text-[15px] leading-8 text-foreground/95 [text-indent:2em]">
+              <div className="whitespace-pre-wrap text-[15px] leading-8 text-foreground/95 indent-[2em]">
                 {preview}
               </div>
             </div>

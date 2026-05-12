@@ -15,6 +15,13 @@ export interface NovelOutline {
 
 export const NOVEL_OUTLINES_STORAGE_KEY = "novel.outlines.v1";
 export const NOVEL_LAUNCH_PROMPT_KEY = "novel.launch.prompt.v1";
+export const NOVEL_LAUNCH_SESSION_KEY = "novel.launch.session.v1";
+
+export type LaunchSession = {
+  prompt: string;
+  /** 为 true 时进入 /outlines 后立即开跑大纲（默认 false：先落到底栏可改，再点「生成大纲」） */
+  autoGenerate: boolean;
+};
 const EMPTY_OUTLINES: NovelOutline[] = [];
 let cachedOutlinesRaw: string | null | undefined;
 let cachedOutlinesValue: NovelOutline[] = EMPTY_OUTLINES;
@@ -101,12 +108,11 @@ const parseRecord = (raw: string): Record<string, unknown> | null => {
 export const isChapterOutputComplete = (value: string): boolean => {
   const text = value.trim();
   if (!text) return false;
-  return (
-    !text.includes("生成中...") &&
-    !text.includes("扩写中...") &&
-    !text.includes("续写中") &&
-    !text.includes("生成失败")
-  );
+  if (text.includes("生成中...") || text.includes("扩写中...") || text.includes("生成失败")) {
+    return false;
+  }
+  if (text.startsWith("续写中")) return false;
+  return true;
 };
 
 export const isOutlineOutputComplete = (outline: Pick<NovelOutline, "rawContent" | "chapters">): boolean => {
@@ -193,24 +199,64 @@ export const subscribePersistedOutlines = (onStoreChange: () => void): (() => vo
   };
 };
 
-export const setLaunchPrompt = (prompt: string): void => {
+export const clearPersistedOutlines = (): void => {
   if (typeof window === "undefined") return;
   try {
-    localStorage.setItem(NOVEL_LAUNCH_PROMPT_KEY, prompt);
+    localStorage.removeItem(NOVEL_OUTLINES_STORAGE_KEY);
+    cachedOutlinesRaw = null;
+    cachedOutlinesValue = EMPTY_OUTLINES;
+  } catch {
+    // ignore
+  }
+};
+
+export const peekLaunchSession = (): LaunchSession | null => {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(NOVEL_LAUNCH_SESSION_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<LaunchSession>;
+      const p = typeof parsed.prompt === "string" ? parsed.prompt : "";
+      if (!p.trim()) return null;
+      return {
+        prompt: p.trim(),
+        autoGenerate: parsed.autoGenerate === true,
+      };
+    }
+
+    const legacy = localStorage.getItem(NOVEL_LAUNCH_PROMPT_KEY) || "";
+    if (!legacy.trim()) return null;
+    return { prompt: legacy.trim(), autoGenerate: false };
+  } catch {
+    return null;
+  }
+};
+
+export const clearLaunchSessionStorage = (): void => {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.removeItem(NOVEL_LAUNCH_SESSION_KEY);
+    localStorage.removeItem(NOVEL_LAUNCH_PROMPT_KEY);
+  } catch {
+    // ignore
+  }
+};
+
+export const setLaunchPrompt = (prompt: string, autoGenerate = false): void => {
+  if (typeof window === "undefined") return;
+  try {
+    const session: LaunchSession = { prompt, autoGenerate };
+    localStorage.setItem(NOVEL_LAUNCH_SESSION_KEY, JSON.stringify(session));
+    localStorage.removeItem(NOVEL_LAUNCH_PROMPT_KEY);
   } catch {
     // ignore storage errors
   }
 };
 
-export const consumeLaunchPrompt = (): string => {
-  if (typeof window === "undefined") return "";
-  try {
-    const value = localStorage.getItem(NOVEL_LAUNCH_PROMPT_KEY) || "";
-    localStorage.removeItem(NOVEL_LAUNCH_PROMPT_KEY);
-    return value;
-  } catch {
-    return "";
-  }
+export const consumeLaunchSession = (): LaunchSession | null => {
+  const session = peekLaunchSession();
+  if (session) clearLaunchSessionStorage();
+  return session;
 };
 
 export const getServerPersistedOutlinesSnapshot = (): NovelOutline[] => EMPTY_OUTLINES;

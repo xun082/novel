@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { setLaunchPrompt } from "@/lib/novel-data";
 
 interface PromptPreset {
   label: string;
@@ -65,6 +64,18 @@ const PROMPT_PRESETS: PromptPreset[] = [
   },
 ];
 
+/** 避免地址栏过长；超长时在末尾加「…」截断 */
+const OUTLINE_SEED_QUERY_MAX = 1750;
+
+function outlinesPathWithSeed(prompt: string): string {
+  let p = prompt;
+  while (encodeURIComponent(p).length > OUTLINE_SEED_QUERY_MAX && p.length > 24) {
+    p = p.slice(0, -12);
+  }
+  if (p !== prompt) p += "…";
+  return `/outlines?seed=${encodeURIComponent(p)}`;
+}
+
 export default function HomePage() {
   const router = useRouter();
   const [novelInput, setNovelInput] = useState("主角出身普通被轻视，意外觉醒独特能力后一路成长逆袭；开场有冲突，3场内有反转，结尾留悬念，价值观正向。");
@@ -76,12 +87,11 @@ export default function HomePage() {
     if (!promptText) return;
 
     setNavigating(true);
-    setLaunchPrompt(promptText);
-    router.push("/outlines");
+    router.push(outlinesPathWithSeed(promptText));
   };
 
   return (
-    <div className="min-h-screen w-screen overflow-x-hidden bg-[radial-gradient(circle_at_10%_20%,rgba(56,189,248,0.14),transparent_45%),radial-gradient(circle_at_90%_10%,rgba(236,72,153,0.12),transparent_45%),linear-gradient(180deg,#020617,#030712_48%,#0b1120)]">
+    <div className="min-h-screen w-full min-w-0 overflow-x-hidden bg-[radial-gradient(circle_at_10%_20%,rgba(56,189,248,0.14),transparent_45%),radial-gradient(circle_at_90%_10%,rgba(236,72,153,0.12),transparent_45%),linear-gradient(180deg,#020617,#030712_48%,#0b1120)]">
       <main className="flex min-h-[calc(100vh-76px)] w-full items-center justify-center px-4 pb-16">
         <div className="w-full max-w-3xl">
           <div className="mb-6 text-center">
@@ -89,7 +99,7 @@ export default function HomePage() {
               选一个爆点，直接开写短剧
             </h1>
             <p className="mt-2 text-sm text-muted-foreground">
-              首页先定题材和钩子；进大纲工作台后再并发生成剧情与续写。
+              选好题材后进入工作台，在底栏确认或修改文案，再点「生成大纲」并发生成。
             </p>
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
@@ -120,15 +130,15 @@ export default function HomePage() {
         </div>
       </main>
 
-      <div className="pointer-events-none fixed bottom-3 left-1/2 z-30 w-[min(720px,calc(100vw-24px))] -translate-x-1/2">
-        <div className="pointer-events-auto rounded-xl border border-border/70 bg-card/85 px-3 py-2.5 shadow-[0_14px_45px_-24px_rgba(2,6,23,0.95)] backdrop-blur-xl">
-          <div className="flex items-end gap-2">
+      <div className="pointer-events-none fixed bottom-3 left-1/2 z-30 w-[min(720px,calc(100%-24px))] max-w-full -translate-x-1/2">
+        <div className="pointer-events-auto max-w-full overflow-x-hidden rounded-xl border border-border/70 bg-card/85 px-3 py-2.5 shadow-[0_14px_45px_-24px_rgba(2,6,23,0.95)] backdrop-blur-xl">
+          <div className="flex min-w-0 max-w-full items-end gap-2 overflow-x-hidden">
             <Textarea
               value={novelInput}
               onChange={(e) => setNovelInput(e.target.value)}
               placeholder="题材、世界观、主角设定..."
               rows={2}
-              className="min-h-18 max-h-36 flex-1 resize-none overflow-y-auto rounded-lg border border-border/60 bg-background/80 px-3 py-2.5 text-sm leading-relaxed shadow-none focus-visible:ring-0"
+              className="min-h-18 max-h-36 min-w-0 flex-1 basis-0 resize-none overflow-y-auto overflow-x-hidden rounded-lg border border-border/60 bg-background/80 px-3 py-2.5 text-sm leading-relaxed shadow-none focus-visible:ring-0"
             />
             <Button
               onClick={() => openOutlinesWorkspace()}
