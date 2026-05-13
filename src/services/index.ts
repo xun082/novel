@@ -103,6 +103,7 @@ class RWKVService {
     endpoint: string,
     payload: Record<string, unknown>,
     onUpdate?: (index: number, content: string) => void,
+    onComplete?: (index: number, content: string) => void,
   ): Promise<string[]> {
     const finalPayload: Record<string, unknown> = {
       ...payload,
@@ -140,34 +141,40 @@ class RWKVService {
       return this.extractAllContents(fallback);
     }
 
-    return this.consumeStream(response, onUpdate);
+    return this.consumeStream(response, onUpdate, onComplete);
   }
 
   private async consumeStream(
     response: Response,
     onUpdate?: (index: number, content: string) => void,
+    onComplete?: (index: number, content: string) => void,
   ): Promise<string[]> {
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
 
     const accumulated: Record<number, string> = {};
-    const finishReasons: Record<number, string> = {};
+    const completedIndexes = new Set<number>();
     let buffer = "";
     let chunkCount = 0;
 
     const handleParsed = (payload: unknown) => {
       if (!isStreamPayload(payload) || !payload.choices) return;
       for (const choice of payload.choices) {
-        const index = choice.index ?? 0;
-        if (choice.finish_reason) {
-          finishReasons[index] = String(choice.finish_reason);
+        if (typeof choice.index !== "number" || !Number.isFinite(choice.index)) {
+          continue;
         }
+        const index = choice.index;
         const delta =
           choice.delta?.content || choice.message?.content || choice.text || "";
-        if (!delta) continue;
+        if (delta) {
+          accumulated[index] = (accumulated[index] || "") + delta;
+          if (onUpdate) onUpdate(index, accumulated[index]);
+        }
 
-        accumulated[index] = (accumulated[index] || "") + delta;
-        if (onUpdate) onUpdate(index, accumulated[index]);
+        if (choice.finish_reason && !completedIndexes.has(index)) {
+          completedIndexes.add(index);
+          if (onComplete) onComplete(index, accumulated[index] || "");
+        }
       }
     };
 
@@ -198,7 +205,14 @@ class RWKVService {
       handleParsed(parsed);
     };
 
+    /** 让出主线程，避免单次 read 内成百上千次 setState 被 React 一次性批处理、界面长时间不刷新 */
+    const yieldForPaint = () =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+
     try {
+      let linesSinceYield = 0;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -206,9 +220,30 @@ class RWKVService {
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
-        for (const line of lines) processLine(line);
+        for (const line of lines) {
+          processLine(line);
+          if (onUpdate) {
+            linesSinceYield += 1;
+            // 每处理若干行让出一次，使各卡片流式内容能逐段上屏
+            if (linesSinceYield >= 4) {
+              linesSinceYield = 0;
+              await yieldForPaint();
+            }
+          }
+        }
       }
       if (buffer.trim()) processLine(buffer);
+
+      // 兜底：部分上游不回 finish_reason，流关闭后把已收到内容统一视为完成
+      if (onComplete) {
+        for (const [idxRaw, content] of Object.entries(accumulated)) {
+          const idx = Number(idxRaw);
+          if (!completedIndexes.has(idx)) {
+            onComplete(idx, content || "");
+            completedIndexes.add(idx);
+          }
+        }
+      }
     } finally {
       reader.releaseLock();
     }
@@ -254,11 +289,13 @@ class RWKVService {
     chapters: number,
     count: number,
     onUpdate?: (index: number, content: string) => void,
+    onComplete?: (index: number, content: string) => void,
   ): Promise<string[]> {
     return this.postAndStream(
       this.endpoints.outlines,
       { genre, chapters, count },
       onUpdate,
+      onComplete,
     );
   }
 
@@ -290,6 +327,7 @@ class RWKVService {
       chapter: { title: string; outline: string };
     }>,
     onUpdate?: (index: number, content: string) => void,
+    onComplete?: (index: number, content: string) => void,
   ): Promise<string[]> {
     if (tasks.length === 0) return [];
 
@@ -346,6 +384,12 @@ class RWKVService {
             if (typeof taskIndex === "number") onUpdate(taskIndex, content);
           }
         : undefined,
+      onComplete
+        ? (flatIndex, content) => {
+            const taskIndex = flatToTaskIndex[flatIndex];
+            if (typeof taskIndex === "number") onComplete(taskIndex, content);
+          }
+        : undefined,
     );
 
     const merged: string[] = Array.from({ length: tasks.length }, () => "");
@@ -363,9 +407,10 @@ class RWKVService {
     novelContext: { title: string; summary: string },
     chapters: Array<{ title: string; outline: string }>,
     onUpdate?: (index: number, content: string) => void,
+    onComplete?: (index: number, content: string) => void,
   ): Promise<string[]> {
     const tasks = chapters.map((chapter) => ({ novelContext, chapter }));
-    return this.generateChaptersByTasks(tasks, onUpdate);
+    return this.generateChaptersByTasks(tasks, onUpdate, onComplete);
   }
 
   /**
@@ -374,8 +419,14 @@ class RWKVService {
   async expandChapters(
     chapters: Array<{ title: string; outline: string; currentContent: string }>,
     onUpdate?: (index: number, content: string) => void,
+    onComplete?: (index: number, content: string) => void,
   ): Promise<string[]> {
-    return this.postAndStream(this.endpoints.expand, { chapters }, onUpdate);
+    return this.postAndStream(
+      this.endpoints.expand,
+      { chapters },
+      onUpdate,
+      onComplete,
+    );
   }
 }
 

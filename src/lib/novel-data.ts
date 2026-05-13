@@ -1,3 +1,5 @@
+import { extractParseableJsonObject, stripLlmJsonNoise } from "@/lib/extract-parseable-json";
+
 export interface NovelChapter {
   id: number;
   title: string;
@@ -22,16 +24,12 @@ export type LaunchSession = {
   /** 为 true 时进入 /outlines 后立即开跑大纲（默认 false：先落到底栏可改，再点「生成大纲」） */
   autoGenerate: boolean;
 };
+
 const EMPTY_OUTLINES: NovelOutline[] = [];
 let cachedOutlinesRaw: string | null | undefined;
 let cachedOutlinesValue: NovelOutline[] = EMPTY_OUTLINES;
 
-const cleanRawText = (value: string): string =>
-  value
-    .replace(/<think>[\s\S]*?<\/think>/g, "")
-    .replace(/^```(?:json)?\s*/gi, "")
-    .replace(/\s*```$/g, "")
-    .trim();
+const cleanRawText = (value: string): string => stripLlmJsonNoise(value);
 
 const decodeEscaped = (value: string): string =>
   value
@@ -88,22 +86,7 @@ const extractQuotedField = (raw: string, key: string): string => {
   return decodeEscaped(result);
 };
 
-const parseRecord = (raw: string): Record<string, unknown> | null => {
-  try {
-    return JSON.parse(raw) as Record<string, unknown>;
-  } catch {
-    try {
-      const firstBrace = raw.indexOf("{");
-      const lastBrace = raw.lastIndexOf("}");
-      if (firstBrace === -1 || lastBrace === -1 || firstBrace >= lastBrace) {
-        return null;
-      }
-      return JSON.parse(raw.slice(firstBrace, lastBrace + 1)) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-  }
-};
+const parseRecord = (raw: string): Record<string, unknown> | null => extractParseableJsonObject(raw);
 
 export const isChapterOutputComplete = (value: string): boolean => {
   const text = value.trim();

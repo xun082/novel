@@ -14,6 +14,7 @@ import {
   readPersistedOutlines,
 } from "@/lib/novel-data";
 import { cn } from "@/lib/utils";
+import { extractParseableJsonObject, stripLlmJsonNoise } from "@/lib/extract-parseable-json";
 import { RwkvProductionUpstreamSettings } from "@/components/RwkvProductionUpstreamSettings";
 
 interface Chapter {
@@ -151,39 +152,17 @@ export default function Home() {
 
   useEffect(() => {
     if (!storageReady) return;
-    persistOutlines(outlines);
-  }, [outlines, storageReady]);
-
-  const extractJSON = (text: string): Record<string, unknown> | null => {
-    if (!text || text.trim().length === 0) return null;
-
-    try {
-      let cleaned = text.trim();
-      cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/g, "");
-      cleaned = cleaned.replace(/^```(?:json)?\s*/gi, "");
-      cleaned = cleaned.replace(/\s*```\s*$/g, "");
-
-      const firstBrace = cleaned.indexOf("{");
-      const lastBrace = cleaned.lastIndexOf("}");
-      if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) return null;
-
-      cleaned = cleaned.substring(firstBrace, lastBrace + 1);
-      return JSON.parse(cleaned) as Record<string, unknown>;
-    } catch {
-      try {
-        const fixed = text
-          .trim()
-          .replace(/<think>[\s\S]*?<\/think>/g, "")
-          .replace(/^```(?:json)?\s*/gi, "")
-          .replace(/\s*```\s*$/g, "");
-        const matches = fixed.match(/\{[\s\S]*\}/);
-        if (!matches) return null;
-        return JSON.parse(matches[0]) as Record<string, unknown>;
-      } catch {
-        return null;
-      }
+    // 流式阶段高频更新 outlines 时，同步 stringify+localStorage 会卡主线程导致「像是一次性画完」
+    if (isGenerating) {
+      const t = window.setTimeout(() => {
+        persistOutlines(outlines);
+      }, 450);
+      return () => window.clearTimeout(t);
     }
-  };
+    persistOutlines(outlines);
+  }, [outlines, storageReady, isGenerating]);
+
+  const extractJSON = extractParseableJsonObject;
 
   const extractStreamingChapterText = (raw: string): string => {
     const parsed = extractJSON(raw);
@@ -191,11 +170,7 @@ export default function Home() {
       return parsed.content.trim();
     }
 
-    const cleaned = raw
-      .replace(/<think>[\s\S]*?<\/think>/g, "")
-      .replace(/^```(?:json)?\s*/gi, "")
-      .replace(/\s*```$/g, "")
-      .trim();
+    const cleaned = stripLlmJsonNoise(raw);
 
     const key = cleaned.match(/"content"\s*:\s*"/);
     if (!key || key.index === undefined) {
@@ -298,6 +273,35 @@ export default function Home() {
     const placeholders = createOutlinePlaceholders(OUTLINE_TOTAL);
     setOutlines(placeholders);
 
+    const pendingRaw = new Map<number, string>();
+    let streamRaf: number | null = null;
+
+    const flushPendingRawToState = () => {
+      if (pendingRaw.size === 0) return;
+      const batch = new Map(pendingRaw);
+      pendingRaw.clear();
+      setOutlines((prev) => {
+        const next = prev.slice();
+        let changed = false;
+        for (const [idx, raw] of batch) {
+          if (!prev[idx]) continue;
+          next[idx] = { ...next[idx], rawContent: raw };
+          changed = true;
+        }
+        return changed ? next : prev;
+      });
+    };
+
+    const scheduleRawUpdate = (index: number, content: string) => {
+      pendingRaw.set(index, content);
+      if (streamRaf != null) return;
+      streamRaf = requestAnimationFrame(() => {
+        streamRaf = null;
+        if (!outlineGenerationLockRef.current) return;
+        flushPendingRawToState();
+      });
+    };
+
     try {
       const rawOutlines = await rwkvService.generateMultipleOutlines(
         promptText,
@@ -305,17 +309,36 @@ export default function Home() {
         OUTLINE_TOTAL,
         (index, content) => {
           if (!outlineGenerationLockRef.current) return;
+          scheduleRawUpdate(index, content);
+        },
+        (index, content) => {
+          if (!outlineGenerationLockRef.current) return;
+          if (streamRaf != null) {
+            cancelAnimationFrame(streamRaf);
+            streamRaf = null;
+          }
+          flushPendingRawToState();
           setOutlines((prev) => {
             if (!prev[index]) return prev;
+            const parsed = parseOutline(content, index);
             const next = prev.slice();
             next[index] = {
-              ...next[index],
-              rawContent: content,
+              ...parsed,
+              chapters:
+                parsed.chapters.length > 0
+                  ? parsed.chapters
+                  : buildChapters(extractJSON(parsed.rawContent), DEFAULT_CHAPTER_COUNT, true),
             };
             return next;
           });
         },
       );
+
+      if (streamRaf != null) {
+        cancelAnimationFrame(streamRaf);
+        streamRaf = null;
+      }
+      flushPendingRawToState();
 
       const finalizedOutlines = rawOutlines.map((raw, index) => {
         const parsed = parseOutline(raw, index);
@@ -396,21 +419,34 @@ export default function Home() {
     }
   };
 
-  const applyChapterUpdate = (
-    outlineId: number,
-    chapterIndex: number,
-    newContent: string,
+  const applyChapterUpdates = (
+    updates: Array<{ outlineId: number; chapterIndex: number; content: string }>,
   ) => {
+    if (updates.length === 0) return;
     setOutlines((prev) => {
-      const outlineIdx = prev.findIndex((outline) => outline.id === outlineId);
-      if (outlineIdx === -1) return prev;
-      const target = prev[outlineIdx];
-      if (!target.chapters[chapterIndex]) return prev;
-      const chapters = target.chapters.slice();
-      chapters[chapterIndex] = { ...chapters[chapterIndex], content: newContent };
       const next = prev.slice();
-      next[outlineIdx] = { ...target, chapters };
-      return next;
+      let changed = false;
+      const outlineIndexMap = new Map<number, number>();
+
+      for (const { outlineId, chapterIndex, content } of updates) {
+        let outlineIdx = outlineIndexMap.get(outlineId);
+        if (outlineIdx === undefined) {
+          outlineIdx = next.findIndex((outline) => outline.id === outlineId);
+          outlineIndexMap.set(outlineId, outlineIdx);
+        }
+
+        if (outlineIdx === -1) continue;
+        const target = next[outlineIdx];
+        if (!target?.chapters[chapterIndex]) continue;
+        if (target.chapters[chapterIndex].content === content) continue;
+
+        const chapters = target.chapters.slice();
+        chapters[chapterIndex] = { ...chapters[chapterIndex], content };
+        next[outlineIdx] = { ...target, chapters };
+        changed = true;
+      }
+
+      return changed ? next : prev;
     });
   };
 
@@ -439,6 +475,52 @@ export default function Home() {
     }
 
     const pendingLabel = "续写中";
+    const pendingChapterUpdates = new Map<
+      string,
+      { outlineId: number; chapterIndex: number; content: string }
+    >();
+    let chapterStreamRaf: number | null = null;
+
+    const flushPendingChapterUpdates = () => {
+      if (pendingChapterUpdates.size === 0) return;
+      const batch = Array.from(pendingChapterUpdates.values());
+      pendingChapterUpdates.clear();
+      applyChapterUpdates(batch);
+    };
+
+    const scheduleChapterUpdate = (update: {
+      outlineId: number;
+      chapterIndex: number;
+      content: string;
+    }) => {
+      pendingChapterUpdates.set(
+        `${update.outlineId}:${update.chapterIndex}`,
+        update,
+      );
+
+      if (chapterStreamRaf != null) return;
+      chapterStreamRaf = requestAnimationFrame(() => {
+        chapterStreamRaf = null;
+        if (!chapterGenerationLockRef.current) return;
+        flushPendingChapterUpdates();
+      });
+    };
+
+    const flushChapterUpdateImmediately = (update: {
+      outlineId: number;
+      chapterIndex: number;
+      content: string;
+    }) => {
+      pendingChapterUpdates.set(
+        `${update.outlineId}:${update.chapterIndex}`,
+        update,
+      );
+      if (chapterStreamRaf != null) {
+        cancelAnimationFrame(chapterStreamRaf);
+        chapterStreamRaf = null;
+      }
+      flushPendingChapterUpdates();
+    };
 
     setIsGenerating(true);
     chapterGenerationLockRef.current = true;
@@ -462,22 +544,56 @@ export default function Home() {
           const pending = streamText
             ? `${pendingLabel}...\n${streamText}`
             : `${pendingLabel}... ${content.length}字`;
-          applyChapterUpdate(task.outline.id, task.chapterIndex, pending);
+          scheduleChapterUpdate({
+            outlineId: task.outline.id,
+            chapterIndex: task.chapterIndex,
+            content: pending,
+          });
+        },
+        (taskIndex, content) => {
+          const task = tasks[taskIndex];
+          if (!task) return;
+          const jsonData = extractJSON(content);
+          const finalContent = ((jsonData?.content as string) || content || "").trim();
+          if (finalContent) {
+            flushChapterUpdateImmediately({
+              outlineId: task.outline.id,
+              chapterIndex: task.chapterIndex,
+              content: finalContent,
+            });
+          }
         },
       );
 
+      if (chapterStreamRaf != null) {
+        cancelAnimationFrame(chapterStreamRaf);
+        chapterStreamRaf = null;
+      }
+      flushPendingChapterUpdates();
+
+      const finalBatch: Array<{ outlineId: number; chapterIndex: number; content: string }> = [];
       tasks.forEach((task, taskIndex) => {
         const raw = rawContents[taskIndex] || "";
         const jsonData = extractJSON(raw);
         const finalContent = ((jsonData?.content as string) || raw || "").trim();
         if (finalContent) {
-          applyChapterUpdate(task.outline.id, task.chapterIndex, finalContent);
+          finalBatch.push({
+            outlineId: task.outline.id,
+            chapterIndex: task.chapterIndex,
+            content: finalContent,
+          });
         }
       });
+      applyChapterUpdates(finalBatch);
     } catch (error) {
       const message = error instanceof Error ? error.message : "未知错误";
       window.alert(`续写失败：${message}`);
     } finally {
+      if (chapterStreamRaf != null) {
+        cancelAnimationFrame(chapterStreamRaf);
+        chapterStreamRaf = null;
+      }
+      pendingChapterUpdates.clear();
       chapterGenerationLockRef.current = false;
       setIsGenerating(false);
     }
@@ -589,6 +705,7 @@ export default function Home() {
                 key={outline.id}
                 outline={outline}
                 onSelect={openOutlineDetails}
+                isGenerating={isGenerating}
               />
             ))}
           </section>

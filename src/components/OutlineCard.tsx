@@ -1,5 +1,7 @@
+import { useEffect, useMemo, useRef } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { normalizeChapterContent } from "@/lib/novel-data";
+import { extractParseableJsonObject, stripLlmJsonNoise } from "@/lib/extract-parseable-json";
 
 interface Chapter {
   id: number;
@@ -20,14 +22,8 @@ interface OutlineCardProps {
   outline: Outline;
   onSelect: (outline: Outline) => void;
   isSelected?: boolean;
+  isGenerating?: boolean;
 }
-
-const cleanRaw = (value: string): string =>
-  value
-    .replace(/<think>[\s\S]*?<\/think>/g, "")
-    .replace(/^```(?:json)?\s*/gi, "")
-    .replace(/\s*```$/g, "")
-    .trim();
 
 const pickString = (source: Record<string, unknown> | null, keys: string[]): string => {
   for (const key of keys) {
@@ -38,6 +34,8 @@ const pickString = (source: Record<string, unknown> | null, keys: string[]): str
   }
   return "";
 };
+
+const parseJSON = (raw: string): Record<string, unknown> | null => extractParseableJsonObject(raw);
 
 const decodeEscaped = (value: string): string =>
   value
@@ -81,19 +79,40 @@ const extractQuotedField = (raw: string, key: string): string => {
   return decodeEscaped(result);
 };
 
-const parseJSON = (raw: string): Record<string, unknown> | null => {
-  const cleaned = cleanRaw(raw);
-  try {
-    const firstBrace = cleaned.indexOf("{");
-    const lastBrace = cleaned.lastIndexOf("}");
-    if (firstBrace === -1 || lastBrace === -1 || firstBrace >= lastBrace) {
-      return null;
-    }
-    const jsonText = cleaned.slice(firstBrace, lastBrace + 1);
-    return JSON.parse(jsonText) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
+const toChapterPreview = (row: Record<string, unknown>, index: number): Chapter => {
+  const chapterLabel =
+    (typeof row.chapter === "string" && row.chapter.trim()) ||
+    (typeof row.章节 === "string" && row.章节.trim()) ||
+    (typeof row.chapter === "number" && Number.isFinite(row.chapter) ? `第${row.chapter}章` : "");
+
+  const title =
+    (typeof row.title === "string" && row.title.trim()) ||
+    (typeof row.标题 === "string" && row.标题.trim()) ||
+    chapterLabel ||
+    `第${index + 1}章`;
+
+  const outline =
+    (typeof row.outline === "string" && row.outline.trim()) ||
+    (typeof row.梗概 === "string" && row.梗概.trim()) ||
+    (typeof row.内容梗概 === "string" && row.内容梗概.trim()) ||
+    "";
+
+  return {
+    id: index + 1,
+    title,
+    outline,
+    content: "",
+  };
+};
+
+const isChapterLikeRow = (row: Record<string, unknown>): boolean => {
+  const chapter = row.chapter ?? row.章节;
+  const outline = row.outline ?? row.梗概 ?? row.内容梗概;
+
+  if (typeof chapter === "string" && chapter.trim()) return true;
+  if (typeof chapter === "number" && Number.isFinite(chapter)) return true;
+  if (typeof outline === "string" && outline.trim()) return true;
+  return false;
 };
 
 const getChapterPreviewFromJSON = (source: Record<string, unknown> | null): Chapter[] => {
@@ -104,25 +123,157 @@ const getChapterPreviewFromJSON = (source: Record<string, unknown> | null): Chap
 
   return rawList.map((item, index) => {
     const row = typeof item === "object" && item !== null ? (item as Record<string, unknown>) : {};
-    const title =
-      (typeof row.title === "string" && row.title.trim()) ||
-      (typeof row.标题 === "string" && row.标题.trim()) ||
-      (typeof row.chapter === "string" && row.chapter.trim()) ||
-      `第${index + 1}章`;
-
-    const outline =
-      (typeof row.outline === "string" && row.outline.trim()) ||
-      (typeof row.梗概 === "string" && row.梗概.trim()) ||
-      (typeof row.内容梗概 === "string" && row.内容梗概.trim()) ||
-      "";
-
-    return {
-      id: index + 1,
-      title,
-      outline,
-      content: "",
-    };
+    return toChapterPreview(row, index);
   });
+};
+
+const getChapterPreviewFromStreamingRaw = (raw: string): Chapter[] => {
+  if (!raw.trim()) return [];
+  const match = raw.match(/"(chapters|章节)"\s*:\s*\[/);
+  if (!match || match.index === undefined) return [];
+
+  const bracketOffset = match[0].lastIndexOf("[");
+  if (bracketOffset < 0) return [];
+  const arrayStart = match.index + bracketOffset;
+
+  const rows: Record<string, unknown>[] = [];
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+  let objStart = -1;
+
+  for (let i = arrayStart + 1; i < raw.length; i++) {
+    const char = raw[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      if (depth === 0) objStart = i;
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      if (depth === 0) continue;
+      depth -= 1;
+      if (depth === 0 && objStart >= 0) {
+        const slice = raw.slice(objStart, i + 1);
+        try {
+          const row = JSON.parse(slice) as Record<string, unknown>;
+          rows.push(row);
+        } catch {
+          // ignore malformed partial object
+        }
+        objStart = -1;
+      }
+      continue;
+    }
+
+    if (char === "]" && depth === 0) break;
+  }
+
+  if (depth > 0 && objStart >= 0) {
+    const partial = raw.slice(objStart);
+    const row: Record<string, unknown> = {};
+    const chapterLabel = extractQuotedField(partial, "chapter") || extractQuotedField(partial, "章节");
+    const title = extractQuotedField(partial, "title") || extractQuotedField(partial, "标题");
+    const outline = extractQuotedField(partial, "outline") ||
+      extractQuotedField(partial, "梗概") ||
+      extractQuotedField(partial, "内容梗概");
+
+    if (chapterLabel) row.chapter = chapterLabel;
+    if (title) row.title = title;
+    if (outline) row.outline = outline;
+
+    if (Object.keys(row).length > 0) {
+      rows.push(row);
+    }
+  }
+
+  return rows.map((row, index) => toChapterPreview(row, index));
+};
+
+const getChapterPreviewFromLooseObjects = (raw: string): Chapter[] => {
+  if (!raw.trim()) return [];
+  const rows: Record<string, unknown>[] = [];
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+  let objStart = -1;
+
+  for (let i = 0; i < raw.length; i++) {
+    const char = raw[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      if (depth === 0) objStart = i;
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      if (depth === 0) continue;
+      depth -= 1;
+      if (depth === 0 && objStart >= 0) {
+        const slice = raw.slice(objStart, i + 1);
+        try {
+          const row = JSON.parse(slice) as Record<string, unknown>;
+          if (isChapterLikeRow(row)) rows.push(row);
+        } catch {
+          // ignore malformed object
+        }
+        objStart = -1;
+      }
+    }
+  }
+
+  if (depth > 0 && objStart >= 0) {
+    const partial = raw.slice(objStart);
+    const row: Record<string, unknown> = {};
+    const chapter =
+      extractQuotedField(partial, "chapter") || extractQuotedField(partial, "章节");
+    const title = extractQuotedField(partial, "title") || extractQuotedField(partial, "标题");
+    const outline =
+      extractQuotedField(partial, "outline") ||
+      extractQuotedField(partial, "梗概") ||
+      extractQuotedField(partial, "内容梗概");
+
+    if (chapter) row.chapter = chapter;
+    if (title) row.title = title;
+    if (outline) row.outline = outline;
+    if (isChapterLikeRow(row)) rows.push(row);
+  }
+
+  return rows.map((row, index) => toChapterPreview(row, index));
 };
 
 const NODE_STYLES = [
@@ -169,11 +320,25 @@ export function OutlineCard({
   outline,
   onSelect,
   isSelected = false,
+  isGenerating = false,
 }: OutlineCardProps) {
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const hasContent = Boolean(outline.rawContent);
 
-  const streamingPreview = cleanRaw(outline.rawContent);
-  const parsed = parseJSON(outline.rawContent);
+  const streamingPreview = useMemo(
+    () => stripLlmJsonNoise(outline.rawContent),
+    [outline.rawContent],
+  );
+  const parsed = useMemo(() => parseJSON(outline.rawContent), [outline.rawContent]);
+  const parsedChapterPreview = useMemo(() => getChapterPreviewFromJSON(parsed), [parsed]);
+  const streamingChapterPreviewFromArray = useMemo(
+    () => getChapterPreviewFromStreamingRaw(streamingPreview),
+    [streamingPreview],
+  );
+  const streamingChapterPreviewFromLooseObjects = useMemo(
+    () => getChapterPreviewFromLooseObjects(streamingPreview),
+    [streamingPreview],
+  );
   const previewTitle = pickString(parsed, ["title", "标题", "小说标题"]) ||
     extractQuotedField(streamingPreview, "title") ||
     extractQuotedField(streamingPreview, "标题");
@@ -187,10 +352,24 @@ export function OutlineCard({
   const displaySummary =
     (outline.summary && outline.summary !== "正在生成中..." ? outline.summary : "") || previewSummary;
   const chapterPreview =
-    outline.chapters.length > 0 ? outline.chapters : getChapterPreviewFromJSON(parsed);
+    outline.chapters.length > 0
+      ? outline.chapters
+      : (parsedChapterPreview.length > 0
+        ? parsedChapterPreview
+        : (streamingChapterPreviewFromArray.length > 0
+          ? streamingChapterPreviewFromArray
+          : streamingChapterPreviewFromLooseObjects));
   const totalChapters = outline.chapters.length;
   const completedChapters = outline.chapters.filter((chapter) => isChapterDone(chapter.content)).length;
   const canOpenDetails = hasContent;
+
+  useEffect(() => {
+    if (!isGenerating) return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    // 生成中自动滚动到最新内容，避免用户误判为无输出
+    el.scrollTop = el.scrollHeight;
+  }, [isGenerating, outline.rawContent, outline.chapters]);
 
   return (
     <Card
@@ -216,7 +395,10 @@ export function OutlineCard({
         )}
 
         {hasContent && (
-          <div className="flex-1 overflow-y-auto rounded-xl border border-border/70 bg-card/70 p-3">
+          <div
+            ref={scrollContainerRef}
+            className="flex-1 overflow-y-auto rounded-xl border border-border/70 bg-card/70 p-3"
+          >
             <div className="flex items-center justify-between gap-2 text-[11px] leading-4 text-muted-foreground">
               <span>大纲 {outline.id}</span>
               {totalChapters > 0 && (
