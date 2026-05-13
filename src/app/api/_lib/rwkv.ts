@@ -8,8 +8,6 @@ const DEFAULT_UPSTREAM_URL = process.env.RWKV_UPSTREAM_URL ?? "";
 const DEFAULT_UPSTREAM_PASSWORD = process.env.RWKV_UPSTREAM_PASSWORD ?? "";
 
 const DEFAULT_MAX_TOKENS = 2000;
-/** 默认 stop 序列：与 RWKV 多轮 User/Assistant 分界一致 */
-const DEFAULT_STOP_TOKENS: (number | string)[] = ["\nUser:"];
 /**
  * 上游 /big_batch/completions 的真正瓶颈：
  *
@@ -97,7 +95,7 @@ function buildUpstreamBody(
   const body: Record<string, unknown> = {
     contents,
     max_tokens: maxTokens,
-    stop_tokens: opts.stopTokens ?? DEFAULT_STOP_TOKENS,
+    stop_tokens: ["\nUser:"],
     temperature: opts.temperature ?? 0.9,
     chunk_size: opts.chunkSize ?? 8,
     stream: true,
