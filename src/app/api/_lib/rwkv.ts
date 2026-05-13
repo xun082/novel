@@ -95,7 +95,6 @@ function buildUpstreamBody(
   const body: Record<string, unknown> = {
     contents,
     max_tokens: maxTokens,
-    stop_tokens: ["\nUser:"],
     temperature: opts.temperature ?? 0.9,
     chunk_size: opts.chunkSize ?? 8,
     stream: true,
