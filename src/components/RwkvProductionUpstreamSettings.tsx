@@ -31,17 +31,17 @@ export function RwkvProductionUpstreamSettings() {
           type="button"
           variant="outline"
           size="icon"
-          className="h-9 w-9 rounded-lg border-border/80 bg-card/90 shadow-md backdrop-blur-sm"
+          className="size-9 rounded-lg border-border/80 bg-card/90 shadow-md backdrop-blur-sm"
           aria-label="上游设置"
           onClick={() => openDialog()}
         >
-          <Settings className="h-4 w-4" />
+          <Settings className="size-4" />
         </Button>
       </div>
 
       {open ? (
         <div
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/55 p-4 backdrop-blur-[2px]"
+          className="fixed inset-0 z-100 flex items-center justify-center bg-black/55 p-4 backdrop-blur-[2px]"
           role="presentation"
           onMouseDown={(e) => {
             if (e.target === e.currentTarget) setOpen(false);
