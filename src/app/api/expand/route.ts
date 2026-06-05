@@ -14,7 +14,6 @@ export const runtime = "nodejs";
 
 interface Payload {
   chapters: ExpandTaskInput[];
-  maxTokens?: number;
 }
 
 function isValidChapter(value: unknown): value is ExpandTaskInput {
@@ -54,12 +53,8 @@ export async function POST(req: NextRequest) {
 
   const prompts = buildExpandPrompts(chapters);
 
-  // 扩写后每章目标 1200-1500 字 ≈ 1500 token；
-  // 150 × 1500 = 225k 会被上游拒为空 body，所以默认取 1000，
-  // TOTAL_TOKEN_BUDGET 还会兜底按比例下调。
-  return callUpstreamStream({
+  return callUpstreamStream("expand", {
     contents: prompts,
-    maxTokens: payload.maxTokens ?? 1000,
     ...upstreamCredentialsFromPayload(payload as unknown as Record<string, unknown>),
   });
 }

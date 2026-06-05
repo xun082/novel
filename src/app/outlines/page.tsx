@@ -527,15 +527,9 @@ export default function Home() {
 
     try {
       const rawContents = await rwkvService.generateChaptersByTasks(
-        tasks.map(({ outline, chapter }) => ({
-          novelContext: {
-            title: outline.title,
-            summary: outline.summary,
-          },
-          chapter: {
-            title: chapter.title,
-            outline: chapter.outline,
-          },
+        tasks.map(({ chapter }) => ({
+          title: chapter.title,
+          outline: chapter.outline,
         })),
         (taskIndex, content) => {
           const task = tasks[taskIndex];
@@ -722,7 +716,7 @@ export default function Home() {
               readOnly={isSecondRound}
               placeholder={
                 isSecondRound
-                  ? "创建时的总设定（只读）；续写仅依据上方卡片内大纲与章节梗概"
+                  ? "创建时的总设定（只读）；续写每章仅依据该章标题与梗概"
                   : "题材、世界观、主角设定..."
               }
               rows={2}

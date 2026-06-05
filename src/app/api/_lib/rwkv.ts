@@ -1,13 +1,51 @@
 import {
   rwkvResolvedUrlSchema,
-  upstreamCallOptsSchema,
+  upstreamStreamRequestSchema,
 } from "./rwkv-schema";
 
 /** 环境变量默认；请求级覆盖经 zod 校验后优先 */
 const DEFAULT_UPSTREAM_URL = process.env.RWKV_UPSTREAM_URL ?? "";
 const DEFAULT_UPSTREAM_PASSWORD = process.env.RWKV_UPSTREAM_PASSWORD ?? "";
 
-const DEFAULT_MAX_TOKENS = 2000;
+// =============== 上游采样参数（只改这里） ===============
+
+export type RwkvCallKind = "outlines" | "chapters" | "expand";
+
+export interface RwkvSamplingParams {
+  maxTokens: number;
+  temperature: number;
+  topK: number;
+  topP: number;
+  chunkSize: number;
+}
+
+/**
+ * 各接口上游采样与生成参数。
+ * 禁止在调用处用 ?? 兜底；改参数只改此表。
+ */
+export const RWKV_CALL_PARAMS: Record<RwkvCallKind, RwkvSamplingParams> = {
+  outlines: {
+    maxTokens: 6000,
+    temperature: 0.9,
+    topK: 0,
+    topP: 0.3,
+    chunkSize: 8,
+  },
+  chapters: {
+    maxTokens: 1000,
+    temperature: 0.9,
+    topK: 0,
+    topP: 0.3,
+    chunkSize: 8,
+  },
+  expand: {
+    maxTokens: 1000,
+    temperature: 0.9,
+    topK: 0,
+    topP: 0.3,
+    chunkSize: 8,
+  },
+};
 /**
  * 上游 /big_batch/completions 的真正瓶颈：
  *
@@ -44,23 +82,23 @@ export const NO_CACHE_HEADERS = {
   "X-Accel-Buffering": "no",
 } as const;
 
-export interface UpstreamOptions {
+export interface UpstreamStreamRequest {
   contents: string[];
-  maxTokens?: number;
-  temperature?: number;
-  chunkSize?: number;
-  stopTokens?: (number | string)[];
   /** 请求级覆盖，优先于 RWKV_UPSTREAM_PASSWORD */
   password?: string;
   /** 请求级覆盖，优先于 RWKV_UPSTREAM_URL */
   upstreamUrl?: string;
 }
 
-/** 从 POST JSON 根级读取可选上游覆盖（与 {@link UpstreamOptions} 同名，由 zod 在 callUpstreamStream 内校验） */
+interface UpstreamBodyParams extends RwkvSamplingParams {
+  contents: string[];
+}
+
+/** 从 POST JSON 根级读取可选上游覆盖（与 {@link UpstreamStreamRequest} 同名，由 zod 在 callUpstreamStream 内校验） */
 export function upstreamCredentialsFromPayload(
   payload: Record<string, unknown>,
-): Pick<UpstreamOptions, "upstreamUrl" | "password"> {
-  const o: Pick<UpstreamOptions, "upstreamUrl" | "password"> = {};
+): Pick<UpstreamStreamRequest, "upstreamUrl" | "password"> {
+  const o: Pick<UpstreamStreamRequest, "upstreamUrl" | "password"> = {};
   if (typeof payload.upstreamUrl === "string" && payload.upstreamUrl !== "")
     o.upstreamUrl = payload.upstreamUrl;
   if (typeof payload.password === "string" && payload.password !== "")
@@ -68,11 +106,8 @@ export function upstreamCredentialsFromPayload(
   return o;
 }
 
-function resolveMaxTokens(contents: string[], opts: UpstreamOptions): number {
-  const requested = Math.max(
-    1,
-    Math.floor(opts.maxTokens ?? DEFAULT_MAX_TOKENS),
-  );
+function resolveMaxTokens(contents: string[], maxTokens: number): number {
+  const requested = Math.max(1, Math.floor(maxTokens));
   const n = Math.max(1, contents.length);
   const inputTokens = estimateInputTokens(contents);
   const outputBudget = Math.max(
@@ -87,16 +122,17 @@ function resolveMaxTokens(contents: string[], opts: UpstreamOptions): number {
 }
 
 function buildUpstreamBody(
-  contents: string[],
-  opts: UpstreamOptions,
+  params: UpstreamBodyParams,
   password: string | undefined,
 ): string {
-  const maxTokens = resolveMaxTokens(contents, opts);
+  const maxTokens = resolveMaxTokens(params.contents, params.maxTokens);
   const body: Record<string, unknown> = {
-    contents,
+    contents: params.contents,
     max_tokens: maxTokens,
-    temperature: opts.temperature ?? 0.9,
-    chunk_size: opts.chunkSize ?? 8,
+    temperature: params.temperature,
+    top_k: params.topK,
+    top_p: params.topP,
+    chunk_size: params.chunkSize,
     stream: true,
   };
   if (password !== undefined && password !== "") {
@@ -117,8 +153,11 @@ const LOG_PROGRESS_INTERVAL_MS = 5000;
  *   - 每 5 秒打印一次代理进度（chunks/bytes/ETA 首字节时间）。
  *   - 上游/下游任何一端断开，都会把另一端一起关掉，避免 ERR_INVALID_STATE 和算力浪费。
  */
-export async function callUpstreamStream(opts: UpstreamOptions): Promise<Response> {
-  const parsedOpts = upstreamCallOptsSchema.safeParse(opts);
+export async function callUpstreamStream(
+  kind: RwkvCallKind,
+  opts: UpstreamStreamRequest,
+): Promise<Response> {
+  const parsedOpts = upstreamStreamRequestSchema.safeParse(opts);
   if (!parsedOpts.success) {
     return new Response(
       JSON.stringify({
@@ -133,6 +172,7 @@ export async function callUpstreamStream(opts: UpstreamOptions): Promise<Respons
   }
 
   const v = parsedOpts.data;
+  const sampling = RWKV_CALL_PARAMS[kind];
   const url = v.upstreamUrl ?? DEFAULT_UPSTREAM_URL;
   const passwordRaw = v.password ?? DEFAULT_UPSTREAM_PASSWORD;
   const fetchPassword =
@@ -154,18 +194,15 @@ export async function callUpstreamStream(opts: UpstreamOptions): Promise<Respons
 
   const { url: fetchUrl } = urlResolved.data;
 
-  const bodyOpts: UpstreamOptions = {
+  const bodyParams: UpstreamBodyParams = {
     contents: v.contents,
-    maxTokens: v.maxTokens,
-    temperature: v.temperature,
-    chunkSize: v.chunkSize,
-    stopTokens: v.stopTokens,
+    ...sampling,
   };
 
   const total = v.contents.length;
   const startedAt = Date.now();
   const requestId = Math.random().toString(36).slice(2, 8);
-  const effectiveMaxTokens = resolveMaxTokens(v.contents, bodyOpts);
+  const effectiveMaxTokens = resolveMaxTokens(v.contents, sampling.maxTokens);
 
   // 输入 prompt 规模统计（字符，用于粗略 token 估算：中文 ~1.5 char/token）
   let promptTotalChars = 0;
@@ -177,7 +214,7 @@ export async function callUpstreamStream(opts: UpstreamOptions): Promise<Respons
     if (c.length > promptMax) promptMax = c.length;
   }
   const promptAvg = Math.round(promptTotalChars / Math.max(1, total));
-  const body = buildUpstreamBody(v.contents, bodyOpts, fetchPassword);
+  const body = buildUpstreamBody(bodyParams, fetchPassword);
   const estInputTokens = estimateInputTokens(v.contents);
   const estOutputTokens = total * effectiveMaxTokens;
   const estCombined = estInputTokens + estOutputTokens;
@@ -434,26 +471,20 @@ ${differentiation ? `${differentiation}\n` : ""}
   });
 }
 
-export interface ChapterTaskInput {
-  novelContext: { title: string; summary: string };
-  chapter: { title: string; outline: string };
-  /** 仅保留作兼容字段，不再写入 prompt（上游已按 contents[] 下标自动对齐 index） */
-  chapterOrder?: number;
-  chapterTotal?: number;
+export interface ChapterPromptInput {
+  title: string;
+  outline: string;
 }
 
 /**
- * 极简章节 prompt —— 只保留模型真正需要的信息：
- * 小说标题、整体梗概、本章标题、本章梗概，以及 600-800 字 + JSON 输出约束。
- * 其余样板（⚠️ 核心要求 / 写作任务 / 格式要求…）全部删掉，避免 N 条 × 重复废话
- * 把上游的 input token 额度撑爆。
+ * 章节 prompt —— 按扩写规范只给「本章标题 + 本章概括」：
+ * 不传小说总纲，不传其他章节信息；并发时每条 prompt 各自独立。
  */
-export function buildChapterPrompts(tasks: ChapterTaskInput[]): string[] {
+export function buildChapterPrompts(tasks: ChapterPromptInput[]): string[] {
   return tasks.map(
-    ({ novelContext, chapter }) =>
-      `User: 写小说《${novelContext.title}》的一章正文，600-800字，仅输出 JSON：{"content":"..."}。
-整体梗概：${novelContext.summary}
-本章：${chapter.title} —— ${chapter.outline}\n\nAssistant: \`\`\`json\n`,
+    ({ title, outline }) =>
+      `User: 根据本章梗概写正文，600-800字，仅输出 JSON：{"content":"..."}。
+本章：${title} —— ${outline}\n\nAssistant: \`\`\`json\n`,
   );
 }
 
@@ -463,11 +494,14 @@ export interface ExpandTaskInput {
   currentContent: string;
 }
 
+/**
+ * 扩写 prompt —— 同样只给本章标题与概括，外加待扩写的原文。
+ */
 export function buildExpandPrompts(tasks: ExpandTaskInput[]): string[] {
   return tasks.map(
     ({ title, outline, currentContent }) =>
-      `User: 扩写下面这章到 700-900 字，贴合梗概，仅输出 JSON：{"content":"..."}。
-章节：${title} —— ${outline}
+      `User: 扩写下面这章到 700-900 字，贴合本章梗概，仅输出 JSON：{"content":"..."}。
+本章：${title} —— ${outline}
 原文：${currentContent}\n\nAssistant: \`\`\`json\n`,
   );
 }

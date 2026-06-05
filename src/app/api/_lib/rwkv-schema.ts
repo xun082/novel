@@ -12,15 +12,11 @@ export const rwkvResolvedUrlSchema = z.object({
   url: rwkvHttpUrlSchema,
 });
 
-/** callUpstreamStream 入参（含可选的请求级覆盖） */
-export const upstreamCallOptsSchema = z.object({
+/** callUpstreamStream 入参（采样参数由 rwkv.ts 内 RWKV_CALL_PARAMS 提供） */
+export const upstreamStreamRequestSchema = z.object({
   contents: z.array(z.string()).min(1),
-  maxTokens: z.number().positive().max(500_000).optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  chunkSize: z.number().int().positive().max(10_000).optional(),
-  stopTokens: z.array(z.union([z.number().int(), z.string()])).optional(),
   password: z.preprocess(emptyToUndefined, rwkvPasswordSchema.optional()),
   upstreamUrl: z.preprocess(emptyToUndefined, rwkvHttpUrlSchema.optional()),
 });
 
-export type ValidatedUpstreamCallOpts = z.infer<typeof upstreamCallOptsSchema>;
+export type ValidatedUpstreamStreamRequest = z.infer<typeof upstreamStreamRequestSchema>;

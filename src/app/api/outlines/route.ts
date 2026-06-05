@@ -15,7 +15,6 @@ interface Payload {
   genre: string;
   chapters?: number;
   count?: number;
-  maxTokens?: number;
 }
 
 export async function POST(req: NextRequest) {
@@ -42,11 +41,8 @@ export async function POST(req: NextRequest) {
 
   const prompts = buildOutlinePrompts(genre, chapters, count);
 
-  // 大纲较长（含 N 章梗概），每条给较高 token 预算；
-  // 10 × 6000 = 60k，远低于上游总预算。
-  return callUpstreamStream({
+  return callUpstreamStream("outlines", {
     contents: prompts,
-    maxTokens: payload.maxTokens ?? 6000,
     ...upstreamCredentialsFromPayload(payload as unknown as Record<string, unknown>),
   });
 }

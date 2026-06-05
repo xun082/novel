@@ -29,7 +29,7 @@ export function clearRwkvClientCredentials(): void {
   localStorage.removeItem(LS_PASSWORD);
 }
 
-/** 可选：合并进 POST JSON，字段名与 UpstreamOptions 一致，由服务端 zod 校验 */
+/** 可选：合并进 POST JSON，字段名与 UpstreamStreamRequest 一致，由服务端 zod 校验 */
 export function rwkvCredentialsForApiBody(): {
   upstreamUrl?: string;
   password?: string;
