@@ -32,7 +32,7 @@ export default function OutlineDetailPage() {
 
   const totalChapters = outline?.chapters.length || 0;
   const completedChapters = useMemo(
-    () => outline?.chapters.filter((chapter) => isChapterOutputComplete(chapter.content)).length || 0,
+    () => outline?.chapters.filter((chapter) => isChapterOutputComplete(chapter)).length || 0,
     [outline],
   );
 
@@ -66,6 +66,11 @@ export default function OutlineDetailPage() {
             <CardDescription className="whitespace-pre-wrap leading-7 text-foreground/90">
               {outline.summary || "该大纲暂无总纲摘要。"}
             </CardDescription>
+            {outline.worldbuilding?.setting ? (
+              <p className="text-sm leading-6 text-muted-foreground">
+                世界观：{outline.worldbuilding.setting}
+              </p>
+            ) : null}
           </CardHeader>
           <CardContent>
             <div className="rounded-xl border border-border/70 bg-muted/20 p-3">

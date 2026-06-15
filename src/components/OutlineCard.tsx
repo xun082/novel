@@ -1,26 +1,15 @@
 import { useEffect, useMemo, useRef } from "react";
 import { Card, CardContent } from "@/components/ui/card";
-import { normalizeChapterContent } from "@/lib/novel-data";
-import { extractParseableJsonObject, stripLlmJsonNoise } from "@/lib/extract-parseable-json";
-
-interface Chapter {
-  id: number;
-  title: string;
-  outline: string;
-  content: string;
-}
-
-interface Outline {
-  id: number;
-  title: string;
-  summary: string;
-  chapters: Chapter[];
-  rawContent: string;
-}
+import { normalizeChapterContent, type NovelChapter, type NovelOutline } from "@/lib/novel-data";
+import {
+  extractChapterRecords,
+  extractParseableJsonObject,
+  stripLlmJsonNoise,
+} from "@/lib/extract-parseable-json";
 
 interface OutlineCardProps {
-  outline: Outline;
-  onSelect: (outline: Outline) => void;
+  outline: NovelOutline;
+  onSelect: (outline: NovelOutline) => void;
   isSelected?: boolean;
   isGenerating?: boolean;
 }
@@ -79,7 +68,7 @@ const extractQuotedField = (raw: string, key: string): string => {
   return decodeEscaped(result);
 };
 
-const toChapterPreview = (row: Record<string, unknown>, index: number): Chapter => {
+const toChapterPreview = (row: Record<string, unknown>, index: number): NovelChapter => {
   const chapterLabel =
     (typeof row.chapter === "string" && row.chapter.trim()) ||
     (typeof row.章节 === "string" && row.章节.trim()) ||
@@ -101,6 +90,7 @@ const toChapterPreview = (row: Record<string, unknown>, index: number): Chapter 
     id: index + 1,
     title,
     outline,
+    paragraphs: [],
     content: "",
   };
 };
@@ -115,7 +105,7 @@ const isChapterLikeRow = (row: Record<string, unknown>): boolean => {
   return false;
 };
 
-const getChapterPreviewFromJSON = (source: Record<string, unknown> | null): Chapter[] => {
+const getChapterPreviewFromJSON = (source: Record<string, unknown> | null): NovelChapter[] => {
   const rawList = source?.chapters ?? source?.章节;
   if (!Array.isArray(rawList)) {
     return [];
@@ -127,87 +117,10 @@ const getChapterPreviewFromJSON = (source: Record<string, unknown> | null): Chap
   });
 };
 
-const getChapterPreviewFromStreamingRaw = (raw: string): Chapter[] => {
-  if (!raw.trim()) return [];
-  const match = raw.match(/"(chapters|章节)"\s*:\s*\[/);
-  if (!match || match.index === undefined) return [];
+const getChapterPreviewFromStreamingRaw = (raw: string): NovelChapter[] =>
+  extractChapterRecords(raw).map((row, index) => toChapterPreview(row, index));
 
-  const bracketOffset = match[0].lastIndexOf("[");
-  if (bracketOffset < 0) return [];
-  const arrayStart = match.index + bracketOffset;
-
-  const rows: Record<string, unknown>[] = [];
-  let inString = false;
-  let escaped = false;
-  let depth = 0;
-  let objStart = -1;
-
-  for (let i = arrayStart + 1; i < raw.length; i++) {
-    const char = raw[i];
-
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === "\"") {
-      inString = true;
-      continue;
-    }
-
-    if (char === "{") {
-      if (depth === 0) objStart = i;
-      depth += 1;
-      continue;
-    }
-
-    if (char === "}") {
-      if (depth === 0) continue;
-      depth -= 1;
-      if (depth === 0 && objStart >= 0) {
-        const slice = raw.slice(objStart, i + 1);
-        try {
-          const row = JSON.parse(slice) as Record<string, unknown>;
-          rows.push(row);
-        } catch {
-          // ignore malformed partial object
-        }
-        objStart = -1;
-      }
-      continue;
-    }
-
-    if (char === "]" && depth === 0) break;
-  }
-
-  if (depth > 0 && objStart >= 0) {
-    const partial = raw.slice(objStart);
-    const row: Record<string, unknown> = {};
-    const chapterLabel = extractQuotedField(partial, "chapter") || extractQuotedField(partial, "章节");
-    const title = extractQuotedField(partial, "title") || extractQuotedField(partial, "标题");
-    const outline = extractQuotedField(partial, "outline") ||
-      extractQuotedField(partial, "梗概") ||
-      extractQuotedField(partial, "内容梗概");
-
-    if (chapterLabel) row.chapter = chapterLabel;
-    if (title) row.title = title;
-    if (outline) row.outline = outline;
-
-    if (Object.keys(row).length > 0) {
-      rows.push(row);
-    }
-  }
-
-  return rows.map((row, index) => toChapterPreview(row, index));
-};
-
-const getChapterPreviewFromLooseObjects = (raw: string): Chapter[] => {
+const getChapterPreviewFromLooseObjects = (raw: string): NovelChapter[] => {
   if (!raw.trim()) return [];
   const rows: Record<string, unknown>[] = [];
   let inString = false;
@@ -301,6 +214,7 @@ const isChapterDone = (content: string): boolean => {
   return (
     !text.includes("生成中...") &&
     !text.includes("扩写中...") &&
+    !text.includes("写段中...") &&
     !text.startsWith("续写中") &&
     !text.includes("生成失败")
   );
@@ -310,7 +224,7 @@ const getChapterContentPreview = (raw: string): { text: string; pending: boolean
   const trimmed = (raw || "").trim();
   if (!trimmed) return { text: "", pending: false };
 
-  const pendingMatch = trimmed.match(/^(生成中|扩写中|续写中)\.\.\.\s*(?:\d+字)?\s*/);
+  const pendingMatch = trimmed.match(/^(生成中|扩写中|续写中|写段中)\.\.\.\s*(?:\d+字)?\s*/);
   const pending = Boolean(pendingMatch);
   const body = pending ? trimmed.slice(pendingMatch![0].length).trim() : trimmed;
   return { text: normalizeChapterContent(body), pending };

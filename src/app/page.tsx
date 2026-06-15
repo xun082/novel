@@ -2,10 +2,12 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Sparkles } from "lucide-react";
+import { Check, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { RwkvProductionUpstreamSettings } from "@/components/RwkvProductionUpstreamSettings";
+import { usePromptStore } from "@/components/PromptStoreProvider";
+import { publishLaunch } from "@/lib/launch-store";
 
 interface PromptPreset {
   label: string;
@@ -65,74 +67,78 @@ const PROMPT_PRESETS: PromptPreset[] = [
   },
 ];
 
-/** 避免地址栏过长；超长时在末尾加「…」截断 */
-const OUTLINE_SEED_QUERY_MAX = 1750;
-
-function outlinesPathWithSeed(prompt: string): string {
-  let p = prompt;
-  while (encodeURIComponent(p).length > OUTLINE_SEED_QUERY_MAX && p.length > 24) {
-    p = p.slice(0, -12);
-  }
-  if (p !== prompt) p += "…";
-  return `/outlines?seed=${encodeURIComponent(p)}`;
-}
-
 export default function HomePage() {
   const router = useRouter();
-  const [novelInput, setNovelInput] = useState("主角出身普通被轻视，意外觉醒独特能力后一路成长逆袭；开场有冲突，3场内有反转，结尾留悬念，价值观正向。");
+  const { novelInput, setNovelInput, selectedPresetLabel, selectPreset } = usePromptStore();
   const [navigating, setNavigating] = useState(false);
 
-  const openOutlinesWorkspace = (promptOverride?: string) => {
+  // 只有点「开始生成」才会真正跳到 /outlines。卡片点击只填到 textarea，让用户能再改两个字。
+  // 用 launch-store 的内存信号代替 URL ?go=… ：URL 信号在 dev/StrictMode 下会被第一次
+  // mount 消费掉，第二次 mount 就把用户弹回 /；内存信号配合 activeGeneration 标志能挺过。
+  const submit = () => {
     if (navigating) return;
-    const promptText = (promptOverride ?? novelInput).trim();
+    const promptText = novelInput.trim();
     if (!promptText) return;
-
+    publishLaunch(promptText);
     setNavigating(true);
-    router.push(outlinesPathWithSeed(promptText));
+    router.push("/outlines");
   };
 
   return (
     <div className="min-h-screen w-full min-w-0 overflow-x-hidden bg-[radial-gradient(circle_at_10%_20%,rgba(56,189,248,0.14),transparent_45%),radial-gradient(circle_at_90%_10%,rgba(236,72,153,0.12),transparent_45%),linear-gradient(180deg,#020617,#030712_48%,#0b1120)]">
       <RwkvProductionUpstreamSettings />
-      <main className="flex min-h-[calc(100vh-76px)] w-full items-center justify-center px-4 pb-16">
+      <main className="flex min-h-[calc(100vh-76px)] w-full items-center justify-center px-4 pb-44">
         <div className="w-full max-w-3xl">
           <div className="mb-6 text-center">
             <h1 className="text-3xl font-semibold tracking-tight text-foreground">
               选一个爆点，直接开写短剧
             </h1>
             <p className="mt-2 text-sm text-muted-foreground">
-              选好题材后进入工作台，在底栏确认或修改文案，再点「生成大纲」并发生成。
+              点卡片把题材填到下方文案框，确认或微调后再点「开始生成」进入大纲工作台。
             </p>
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-            {PROMPT_PRESETS.map((preset) => (
-              <button
-                key={preset.label}
-                type="button"
-                onClick={() => openOutlinesWorkspace(preset.prompt)}
-                className="group relative overflow-hidden rounded-xl border border-border/70 bg-card/80 p-4 text-left shadow-sm backdrop-blur-sm transition-all hover:-translate-y-0.5 hover:shadow-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
-              >
-                <div
-                  className={`absolute inset-x-0 top-0 h-1 bg-linear-to-r ${preset.accent}`}
-                  aria-hidden
-                />
-                <div className="flex items-center justify-between">
-                  <span className="text-base font-semibold text-foreground">{preset.label}</span>
-                  <Sparkles className="h-3.5 w-3.5 text-muted-foreground transition-colors group-hover:text-primary" />
-                </div>
-                <p className="mt-0.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-                  {preset.tagline}
-                </p>
-                <p className="mt-2 line-clamp-3 text-xs leading-5 text-muted-foreground">
-                  {preset.prompt}
-                </p>
-              </button>
-            ))}
+            {PROMPT_PRESETS.map((preset) => {
+              const isSelected = selectedPresetLabel === preset.label;
+              return (
+                <button
+                  key={preset.label}
+                  type="button"
+                  aria-pressed={isSelected}
+                  onClick={() => selectPreset(preset)}
+                  className={[
+                    "group relative overflow-hidden rounded-xl border bg-card/80 p-4 text-left shadow-sm backdrop-blur-sm transition-all hover:-translate-y-0.5 hover:shadow-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
+                    isSelected
+                      ? "border-primary/80 shadow-lg ring-2 ring-primary/30"
+                      : "border-border/70",
+                  ].join(" ")}
+                >
+                  <div
+                    className={`absolute inset-x-0 top-0 h-1 bg-linear-to-r ${preset.accent}`}
+                    aria-hidden
+                  />
+                  <div className="flex items-center justify-between">
+                    <span className="text-base font-semibold text-foreground">{preset.label}</span>
+                    {isSelected ? (
+                      <Check className="h-3.5 w-3.5 text-primary" />
+                    ) : (
+                      <Sparkles className="h-3.5 w-3.5 text-muted-foreground transition-colors group-hover:text-primary" />
+                    )}
+                  </div>
+                  <p className="mt-0.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
+                    {preset.tagline}
+                  </p>
+                  <p className="mt-2 line-clamp-3 text-xs leading-5 text-muted-foreground">
+                    {preset.prompt}
+                  </p>
+                </button>
+              );
+            })}
           </div>
         </div>
       </main>
 
-      <div className="pointer-events-none fixed bottom-3 left-1/2 z-30 w-[min(720px,calc(100%-24px))] max-w-full -translate-x-1/2">
+      <div className="pointer-events-none fixed bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] left-1/2 z-30 w-[min(720px,calc(100%-24px))] max-w-full -translate-x-1/2">
         <div className="pointer-events-auto max-w-full overflow-x-hidden rounded-xl border border-border/70 bg-card/85 px-3 py-2.5 shadow-[0_14px_45px_-24px_rgba(2,6,23,0.95)] backdrop-blur-xl">
           <div className="flex min-w-0 max-w-full items-end gap-2 overflow-x-hidden">
             <Textarea
@@ -143,12 +149,12 @@ export default function HomePage() {
               className="min-h-18 max-h-36 min-w-0 flex-1 basis-0 resize-none overflow-y-auto overflow-x-hidden rounded-lg border border-border/60 bg-background/80 px-3 py-2.5 text-sm leading-relaxed shadow-none focus-visible:ring-0"
             />
             <Button
-              onClick={() => openOutlinesWorkspace()}
+              onClick={submit}
               disabled={navigating || !novelInput.trim()}
               className="h-9 shrink-0 rounded-full px-4 text-sm"
             >
               <Sparkles className="mr-1.5 h-4 w-4" />
-              {navigating ? "进入中" : "进入大纲工作台"}
+              {navigating ? "进入中" : "开始生成"}
             </Button>
           </div>
         </div>

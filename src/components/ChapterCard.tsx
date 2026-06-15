@@ -23,7 +23,7 @@ export function ChapterCard({ chapter, isGenerating }: ChapterCardProps) {
   const content = useMemo(() => normalizeChapterContent(chapter.content), [chapter.content]);
   const isPendingText =
     chapter.content.includes("生成中...") ||
-    chapter.content.includes("扩写中...") ||
+    chapter.content.includes("写段中...") ||
     chapter.content.startsWith("续写中");
   const contentLength = content.length;
   const shouldCollapse = contentLength > 360 && !isPendingText;

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Loader2, RefreshCw, Sparkles, Wand2 } from "lucide-react";
@@ -12,25 +13,49 @@ import {
   peekLaunchSession,
   persistOutlines,
   readPersistedOutlines,
+  type NovelChapter,
+  type NovelOutline,
+  type NovelParagraph,
 } from "@/lib/novel-data";
+import {
+  buildParagraphExpandTask,
+  buildParagraphGenerationTask,
+  emptyWorldbuilding,
+  getGenerationStage,
+  isParagraphDraftComplete,
+  isParagraphExpandComplete,
+  isStableText,
+  joinChapterParagraphs,
+  MAX_PARAGRAPH_EXPAND_ROUNDS,
+  parseParagraphRows,
+  parseWorldbuilding,
+  type GenerationStage,
+} from "@/lib/novel-generation";
 import { cn } from "@/lib/utils";
-import { extractParseableJsonObject, stripLlmJsonNoise } from "@/lib/extract-parseable-json";
+import {
+  extractChapterRecords,
+  extractParseableJsonObject,
+  stripLlmJsonNoise,
+} from "@/lib/extract-parseable-json";
 import { RwkvProductionUpstreamSettings } from "@/components/RwkvProductionUpstreamSettings";
+import { usePromptStore } from "@/components/PromptStoreProvider";
+import {
+  consumeLaunch,
+  getCurrentGenerationToken,
+  isGenerationActive,
+  markGenerationFinished,
+} from "@/lib/launch-store";
 
-interface Chapter {
-  id: number;
-  title: string;
-  outline: string;
-  content: string;
-}
+type Outline = NovelOutline;
+type Chapter = NovelChapter;
+type Paragraph = NovelParagraph;
 
-interface Outline {
-  id: number;
-  title: string;
-  summary: string;
-  chapters: Chapter[];
-  rawContent: string;
-}
+const STAGE_LABELS: Record<GenerationStage, string> = {
+  worldbuilding: "生成世界观",
+  paragraphs: "写段落草稿",
+  expand: "扩写段落",
+  complete: "重新生成",
+};
 
 const OUTLINE_TOTAL = 10;
 // 上游 /big_batch/completions 对「单请求 N (contents.length)」有硬上限（实测 N≥135 必空 body，
@@ -38,95 +63,36 @@ const OUTLINE_TOTAL = 10;
 // 章节正文不容易因 token 用尽而被截断。
 const DEFAULT_CHAPTER_COUNT = 8;
 
-interface PromptPreset {
-  label: string;
-  tagline: string;
-  prompt: string;
-  accent: string;
-}
-
-const PROMPT_PRESETS: PromptPreset[] = [
-  {
-    label: "玄幻修仙",
-    tagline: "升级流 · 宗门秘境",
-    prompt: "玄幻修仙，升级流，主角资质平平却另辟蹊径，含宗门、秘境、古神血脉。",
-    accent: "from-sky-500/90 to-cyan-500/90",
-  },
-  {
-    label: "都市职场",
-    tagline: "商战 · 逆袭",
-    prompt: "都市现代，职场商战，主角从底层实习生起步，步步为营直面家族企业博弈。",
-    accent: "from-emerald-500/90 to-teal-500/90",
-  },
-  {
-    label: "末世生存",
-    tagline: "丧尸 · 硬核",
-    prompt: "末世丧尸题材，资源稀缺、人性博弈，主角带领小队穿越废土寻找避难所。",
-    accent: "from-rose-500/90 to-orange-500/90",
-  },
-  {
-    label: "硬核科幻",
-    tagline: "星海 · 指挥官",
-    prompt: "硬科幻，星际舰队指挥官视角，跨星系战争，含外星文明与高维武器设定。",
-    accent: "from-indigo-500/90 to-purple-500/90",
-  },
-  {
-    label: "悬疑推理",
-    tagline: "连环案 · 烧脑反转",
-    prompt: "现代悬疑推理，连环凶杀案，主角是天才犯罪心理学家，双线叙事层层反转。",
-    accent: "from-slate-600/90 to-zinc-600/90",
-  },
-  {
-    label: "古代权谋",
-    tagline: "朝堂 · 党争",
-    prompt: "古代宫廷权谋，寒门状元入局朝堂，党争、夺嫡、边疆战事交织推进。",
-    accent: "from-amber-500/90 to-yellow-600/90",
-  },
-  {
-    label: "仙侠武侠",
-    tagline: "江湖 · 血海深仇",
-    prompt: "传统仙侠武侠，江湖恩怨，主角背负灭门之仇，拜师习武逐步揭开身世谜团。",
-    accent: "from-fuchsia-500/90 to-pink-500/90",
-  },
-  {
-    label: "异世冒险",
-    tagline: "穿越 · 魔法职业",
-    prompt: "异世界穿越，奇幻大陆含职业与魔法系统，主角组队探索迷宫秘境并揭露神祇阴谋。",
-    accent: "from-lime-500/90 to-green-600/90",
-  },
-];
-
-const isStableContent = (value: string): boolean => {
-  const text = value.trim();
-  if (!text) return false;
-  if (text.includes("生成中...") || text.includes("扩写中...") || text.includes("生成失败")) {
-    return false;
-  }
-  // 仅把「续写」流式前缀视为进行中，避免正文里出现「续写」字样被误判
-  if (text.startsWith("续写中")) return false;
-  return true;
-};
+const isStableContent = isStableText;
 
 const createOutlinePlaceholders = (count: number): Outline[] =>
   Array.from({ length: count }, (_, index) => ({
     id: index + 1,
     title: `大纲 ${index + 1}`,
     summary: "",
+    worldbuilding: emptyWorldbuilding(),
     chapters: [],
     rawContent: "",
   }));
 
-const stripSeedQueryFromUrl = (): void => {
+const stripLaunchQueryFromUrl = (): void => {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
-  if (!url.searchParams.has("seed")) return;
-  url.searchParams.delete("seed");
+  let changed = false;
+  for (const key of ["seed", "go"]) {
+    if (url.searchParams.has(key)) {
+      url.searchParams.delete(key);
+      changed = true;
+    }
+  }
+  if (!changed) return;
   const q = url.searchParams.toString();
   window.history.replaceState(null, "", `${url.pathname}${q ? `?${q}` : ""}${url.hash}`);
 };
 
 export default function Home() {
-  const [novelInput, setNovelInput] = useState("玄幻，升级流，主角成长线清晰，含宗门与秘境线。");
+  const router = useRouter();
+  const { novelInput, setNovelInput } = usePromptStore();
   const [isGenerating, setIsGenerating] = useState(false);
   const [storageReady, setStorageReady] = useState(false);
   const outlineGenerationLockRef = useRef(false);
@@ -214,20 +180,26 @@ export default function Home() {
     const raw = (jsonData?.chapters || jsonData?.章节 || []) as unknown;
     const list = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
 
-    const parsed = list.slice(0, count).map((chapterData, index) => ({
-      id: index + 1,
-      title:
-        (chapterData.title as string) ||
-        (chapterData.标题 as string) ||
-        (chapterData.chapter as string) ||
-        `第${index + 1}章`,
-      outline:
+    const parsed = list.slice(0, count).map((chapterData, index) => {
+      const outline =
         (chapterData.outline as string) ||
         (chapterData.梗概 as string) ||
         (chapterData.内容梗概 as string) ||
-        "待生成",
-      content: "",
-    }));
+        "待生成";
+      const paragraphs = parseParagraphRows(chapterData, outline);
+
+      return {
+        id: index + 1,
+        title:
+          (chapterData.title as string) ||
+          (chapterData.标题 as string) ||
+          (chapterData.chapter as string) ||
+          `第${index + 1}章`,
+        outline,
+        paragraphs,
+        content: "",
+      };
+    });
 
     if (parsed.length > 0 || !withFallback) return parsed;
 
@@ -235,8 +207,29 @@ export default function Home() {
       id: i + 1,
       title: `第${i + 1}章`,
       outline: "待生成",
+      paragraphs: [],
       content: "",
     }));
+  };
+
+  /**
+   * Recover chapter rows even when the model output is structurally broken JSON.
+   * Tried in order:
+   *   1) strict-parsed root has `chapters` → use it;
+   *   2) walk the raw for `"chapters":[` + balanced `{…}` (ignores premature `]`).
+   * Returns empty array if neither finds anything — caller decides about placeholders.
+   * Without #2 we'd overwrite the streaming preview with `第N章 / 待生成`.
+   */
+  const recoverChapters = (
+    jsonData: Record<string, unknown> | null,
+    rawContent: string,
+    count: number,
+  ): Chapter[] => {
+    const fromJson = buildChapters(jsonData, count, false);
+    if (fromJson.length > 0) return fromJson;
+    const records = extractChapterRecords(rawContent);
+    if (records.length === 0) return [];
+    return buildChapters({ chapters: records }, count, false);
   };
 
   const parseOutline = (rawContent: string, index: number): Outline => {
@@ -256,7 +249,8 @@ export default function Home() {
       id: index + 1,
       title,
       summary,
-      chapters: buildChapters(jsonData, DEFAULT_CHAPTER_COUNT, false),
+      worldbuilding: parseWorldbuilding(jsonData),
+      chapters: recoverChapters(jsonData, rawContent, DEFAULT_CHAPTER_COUNT),
       rawContent,
     };
   };
@@ -266,8 +260,9 @@ export default function Home() {
 
     const promptText = (overridePrompt ?? novelInput).trim();
     if (!promptText) return;
-    stripSeedQueryFromUrl();
+    stripLaunchQueryFromUrl();
     outlineGenerationLockRef.current = true;
+    const launchToken = getCurrentGenerationToken();
     setIsGenerating(true);
 
     const placeholders = createOutlinePlaceholders(OUTLINE_TOTAL);
@@ -327,7 +322,11 @@ export default function Home() {
               chapters:
                 parsed.chapters.length > 0
                   ? parsed.chapters
-                  : buildChapters(extractJSON(parsed.rawContent), DEFAULT_CHAPTER_COUNT, true),
+                  : buildChapters(
+                      extractJSON(parsed.rawContent),
+                      DEFAULT_CHAPTER_COUNT,
+                      true,
+                    ),
             };
             return next;
           });
@@ -357,6 +356,7 @@ export default function Home() {
       setOutlines(createOutlinePlaceholders(OUTLINE_TOTAL));
     } finally {
       outlineGenerationLockRef.current = false;
+      markGenerationFinished(launchToken);
       setIsGenerating(false);
     }
   };
@@ -364,23 +364,43 @@ export default function Home() {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
+    // 优先吃内存信号（首页 publishLaunch 投递的 prompt）；再退到 ?seed=... 历史链接；
+    // 再退到 launch session。三者都没有时再看缓存，最后才考虑回首页。
+    const launchPrompt = consumeLaunch();
+
+    // 兼容老的 /outlines?seed=... 分享链接。
     const params = new URLSearchParams(window.location.search);
     const seed = params.get("seed");
+    let seededPrompt = "";
     if (seed) {
-      let prompt = "";
       try {
-        prompt = decodeURIComponent(seed);
+        seededPrompt = decodeURIComponent(seed).trim();
       } catch {
-        stripSeedQueryFromUrl();
+        seededPrompt = "";
       }
-      if (prompt.trim()) {
-        setNovelInput(prompt);
-        setOutlines(createOutlinePlaceholders(OUTLINE_TOTAL));
-        clearPersistedOutlines();
-        clearLaunchSessionStorage();
-        setStorageReady(true);
+    }
+    stripLaunchQueryFromUrl();
+
+    if (launchPrompt || seededPrompt) {
+      const prompt = (launchPrompt || seededPrompt).trim();
+      if (!prompt) {
+        router.replace("/");
         return;
       }
+      setNovelInput(prompt);
+      setOutlines(createOutlinePlaceholders(OUTLINE_TOTAL));
+      clearPersistedOutlines();
+      clearLaunchSessionStorage();
+      setStorageReady(true);
+      void generateOutlinesAndChapters(prompt);
+      return;
+    }
+
+    // 没消费到信号，但 generation 还在跑——说明这是 Strict Mode 的二次 mount，第一次
+    // 已经把 launch 吃掉并开始生成了；这里什么都不做，直接复用上一次 mount 启动的流程。
+    if (isGenerationActive()) {
+      setStorageReady(true);
+      return;
     }
 
     const session = peekLaunchSession();
@@ -399,8 +419,12 @@ export default function Home() {
     const cached = readPersistedOutlines() as Outline[];
     if (cached.length > 0) {
       setOutlines(cached);
+      setStorageReady(true);
+      return;
     }
-    setStorageReady(true);
+
+    // 没有发起信号 / session / 缓存——把用户送回首页继续挑题材或改文案。
+    router.replace("/");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -419,29 +443,41 @@ export default function Home() {
     }
   };
 
-  const applyChapterUpdates = (
-    updates: Array<{ outlineId: number; chapterIndex: number; content: string }>,
+  const applyParagraphUpdates = (
+    updates: Array<{
+      outlineId: number;
+      chapterIndex: number;
+      paragraphIndex: number;
+      draft?: string;
+      content?: string;
+    }>,
   ) => {
     if (updates.length === 0) return;
     setOutlines((prev) => {
       const next = prev.slice();
       let changed = false;
-      const outlineIndexMap = new Map<number, number>();
 
-      for (const { outlineId, chapterIndex, content } of updates) {
-        let outlineIdx = outlineIndexMap.get(outlineId);
-        if (outlineIdx === undefined) {
-          outlineIdx = next.findIndex((outline) => outline.id === outlineId);
-          outlineIndexMap.set(outlineId, outlineIdx);
-        }
-
+      for (const update of updates) {
+        const outlineIdx = next.findIndex((outline) => outline.id === update.outlineId);
         if (outlineIdx === -1) continue;
-        const target = next[outlineIdx];
-        if (!target?.chapters[chapterIndex]) continue;
-        if (target.chapters[chapterIndex].content === content) continue;
 
+        const target = next[outlineIdx];
+        const chapter = target.chapters[update.chapterIndex];
+        const paragraph = chapter?.paragraphs[update.paragraphIndex];
+        if (!chapter || !paragraph) continue;
+
+        const nextParagraph = { ...paragraph };
+        if (update.draft !== undefined) nextParagraph.draft = update.draft;
+        if (update.content !== undefined) nextParagraph.content = update.content;
+
+        const paragraphs = chapter.paragraphs.slice();
+        paragraphs[update.paragraphIndex] = nextParagraph;
         const chapters = target.chapters.slice();
-        chapters[chapterIndex] = { ...chapters[chapterIndex], content };
+        chapters[update.chapterIndex] = {
+          ...chapter,
+          paragraphs,
+          content: joinChapterParagraphs(paragraphs),
+        };
         next[outlineIdx] = { ...target, chapters };
         changed = true;
       }
@@ -450,261 +486,432 @@ export default function Home() {
     });
   };
 
-  const generateAllChapterContents = async (regenerateAll = false) => {
+  // Same regex-based "content" walker as extractStreamingChapterText, which
+  // tolerates the model's frequent failure mode: writing `{"content":"…prose…`
+  // and then hitting max_tokens / emitting the closing ``` fence before the
+  // trailing `"}`. The old implementation fell back to the raw text on parse
+  // failure, which dumped the `{\n  "content":` wrapper into paragraph.content.
+  const extractParagraphContent = extractStreamingChapterText;
+
+  type ParagraphTask = {
+    outline: Outline;
+    chapterIndex: number;
+    paragraphIndex: number;
+  };
+
+  const runParagraphDrafts = async (regenerateAll = false) => {
     if (chapterGenerationLockRef.current || outlineGenerationLockRef.current) return;
 
     const snapshot = outlines;
-    const tasks = snapshot.flatMap((outline) =>
-      outline.chapters
-        .map((chapter, chapterIndex) => ({ outline, chapter, chapterIndex }))
-        .filter(({ chapter }) => {
-          const outlineText = chapter.outline?.trim();
-          if (!outlineText || outlineText === "待生成") return false;
-          if (regenerateAll) return true;
-          return !isStableContent(chapter.content);
-        }),
+    const pendingTasks: ParagraphTask[] = snapshot.flatMap((outline) =>
+      outline.chapters.flatMap((chapter, chapterIndex) =>
+        chapter.paragraphs
+          .map((paragraph, paragraphIndex) => ({
+            outline,
+            chapterIndex,
+            paragraphIndex,
+            paragraph,
+          }))
+          .filter(({ paragraph }) => {
+            const outlineText = paragraph.outline?.trim();
+            if (!outlineText || outlineText === "待生成") return false;
+            if (regenerateAll) return true;
+            return !isParagraphDraftComplete(paragraph.draft);
+          }),
+      ),
     );
 
-    if (tasks.length === 0) {
-      if (!regenerateAll) {
-        window.alert(
-          "没有需要续写的章节：各章正文已就绪，或章节梗概仍为空/为「待生成」。若刚中断过生成，请点「重置」后重新生成大纲。",
-        );
+    if (pendingTasks.length === 0) return;
+
+    const workingDrafts = new Map<string, string>();
+    const workingContents = new Map<string, string>();
+    if (!regenerateAll) {
+      for (const outline of snapshot) {
+        outline.chapters.forEach((chapter, chapterIndex) => {
+          chapter.paragraphs.forEach((paragraph, paragraphIndex) => {
+            const key = `${outline.id}:${chapterIndex}:${paragraphIndex}`;
+            if (isParagraphDraftComplete(paragraph.draft)) {
+              workingDrafts.set(key, paragraph.draft);
+            }
+            if (isParagraphExpandComplete(paragraph.content)) {
+              workingContents.set(key, paragraph.content);
+            }
+          });
+        });
       }
-      return;
     }
 
-    const pendingLabel = "续写中";
-    const pendingChapterUpdates = new Map<
+    const waveKeys = new Map<string, ParagraphTask[]>();
+    for (const task of pendingTasks) {
+      const waveKey = `${task.chapterIndex}:${task.paragraphIndex}`;
+      const wave = waveKeys.get(waveKey) ?? [];
+      wave.push(task);
+      waveKeys.set(waveKey, wave);
+    }
+
+    const sortedWaveKeys = [...waveKeys.keys()].sort((a, b) => {
+      const [aChapter, aParagraph] = a.split(":").map(Number);
+      const [bChapter, bParagraph] = b.split(":").map(Number);
+      return aChapter - bChapter || aParagraph - bParagraph;
+    });
+
+    const pendingLabel = "写段中";
+    const pendingUpdates = new Map<
       string,
-      { outlineId: number; chapterIndex: number; content: string }
-    >();
-    let chapterStreamRaf: number | null = null;
-
-    const flushPendingChapterUpdates = () => {
-      if (pendingChapterUpdates.size === 0) return;
-      const batch = Array.from(pendingChapterUpdates.values());
-      pendingChapterUpdates.clear();
-      applyChapterUpdates(batch);
-    };
-
-    const scheduleChapterUpdate = (update: {
-      outlineId: number;
-      chapterIndex: number;
-      content: string;
-    }) => {
-      pendingChapterUpdates.set(
-        `${update.outlineId}:${update.chapterIndex}`,
-        update,
-      );
-
-      if (chapterStreamRaf != null) return;
-      chapterStreamRaf = requestAnimationFrame(() => {
-        chapterStreamRaf = null;
-        if (!chapterGenerationLockRef.current) return;
-        flushPendingChapterUpdates();
-      });
-    };
-
-    const flushChapterUpdateImmediately = (update: {
-      outlineId: number;
-      chapterIndex: number;
-      content: string;
-    }) => {
-      pendingChapterUpdates.set(
-        `${update.outlineId}:${update.chapterIndex}`,
-        update,
-      );
-      if (chapterStreamRaf != null) {
-        cancelAnimationFrame(chapterStreamRaf);
-        chapterStreamRaf = null;
+      {
+        outlineId: number;
+        chapterIndex: number;
+        paragraphIndex: number;
+        draft: string;
       }
-      flushPendingChapterUpdates();
+    >();
+    let streamRaf: number | null = null;
+
+    const flushPending = () => {
+      if (pendingUpdates.size === 0) return;
+      applyParagraphUpdates(Array.from(pendingUpdates.values()).map((item) => ({
+        outlineId: item.outlineId,
+        chapterIndex: item.chapterIndex,
+        paragraphIndex: item.paragraphIndex,
+        draft: item.draft,
+      })));
+      pendingUpdates.clear();
+    };
+
+    const scheduleUpdate = (update: {
+      outlineId: number;
+      chapterIndex: number;
+      paragraphIndex: number;
+      draft: string;
+    }) => {
+      pendingUpdates.set(
+        `${update.outlineId}:${update.chapterIndex}:${update.paragraphIndex}`,
+        update,
+      );
+      if (streamRaf != null) return;
+      streamRaf = requestAnimationFrame(() => {
+        streamRaf = null;
+        if (!chapterGenerationLockRef.current) return;
+        flushPending();
+      });
     };
 
     setIsGenerating(true);
     chapterGenerationLockRef.current = true;
 
     try {
-      const rawContents = await rwkvService.generateChaptersByTasks(
-        tasks.map(({ chapter }) => ({
-          title: chapter.title,
-          outline: chapter.outline,
-        })),
-        (taskIndex, content) => {
-          const task = tasks[taskIndex];
-          if (!task) return;
-          const streamText = extractStreamingChapterText(content);
-          const pending = streamText
-            ? `${pendingLabel}...\n${streamText}`
-            : `${pendingLabel}... ${content.length}字`;
-          scheduleChapterUpdate({
-            outlineId: task.outline.id,
-            chapterIndex: task.chapterIndex,
-            content: pending,
-          });
-        },
-        (taskIndex, content) => {
-          const task = tasks[taskIndex];
-          if (!task) return;
-          const jsonData = extractJSON(content);
-          const finalContent = ((jsonData?.content as string) || content || "").trim();
-          if (finalContent) {
-            flushChapterUpdateImmediately({
+      for (const waveKey of sortedWaveKeys) {
+        const waveTasks = waveKeys.get(waveKey)!;
+        const inputs = waveTasks.map(({ outline, chapterIndex, paragraphIndex }) => {
+          const previousParagraphContent =
+            paragraphIndex > 0
+              ? workingContents.get(`${outline.id}:${chapterIndex}:${paragraphIndex - 1}`) ||
+                workingDrafts.get(`${outline.id}:${chapterIndex}:${paragraphIndex - 1}`)
+              : undefined;
+          const previousChapterContent =
+            chapterIndex > 0
+              ? joinChapterParagraphs(
+                  outline.chapters[chapterIndex - 1].paragraphs.map((paragraph, index) => ({
+                    ...paragraph,
+                    content:
+                      workingContents.get(`${outline.id}:${chapterIndex - 1}:${index}`) ||
+                      workingDrafts.get(`${outline.id}:${chapterIndex - 1}:${index}`) ||
+                      paragraph.content ||
+                      paragraph.draft,
+                  })),
+                ) || undefined
+              : undefined;
+
+          return buildParagraphGenerationTask(
+            outline,
+            chapterIndex,
+            paragraphIndex,
+            previousParagraphContent,
+            previousChapterContent,
+          );
+        });
+
+        const rawContents = await rwkvService.generateParagraphDrafts(
+          inputs,
+          (taskIndex, content) => {
+            const task = waveTasks[taskIndex];
+            if (!task) return;
+            const streamText = extractStreamingChapterText(content);
+            scheduleUpdate({
               outlineId: task.outline.id,
               chapterIndex: task.chapterIndex,
-              content: finalContent,
+              paragraphIndex: task.paragraphIndex,
+              draft: streamText
+                ? `${pendingLabel}...\n${streamText}`
+                : `${pendingLabel}... ${content.length}字`,
             });
-          }
-        },
-      );
+          },
+          (taskIndex, content) => {
+            const task = waveTasks[taskIndex];
+            if (!task) return;
+            const finalDraft = extractParagraphContent(content);
+            if (!finalDraft) return;
+            workingDrafts.set(
+              `${task.outline.id}:${task.chapterIndex}:${task.paragraphIndex}`,
+              finalDraft,
+            );
+            if (streamRaf != null) {
+              cancelAnimationFrame(streamRaf);
+              streamRaf = null;
+            }
+            pendingUpdates.set(
+              `${task.outline.id}:${task.chapterIndex}:${task.paragraphIndex}`,
+              {
+                outlineId: task.outline.id,
+                chapterIndex: task.chapterIndex,
+                paragraphIndex: task.paragraphIndex,
+                draft: finalDraft,
+              },
+            );
+            flushPending();
+          },
+        );
 
-      if (chapterStreamRaf != null) {
-        cancelAnimationFrame(chapterStreamRaf);
-        chapterStreamRaf = null;
-      }
-      flushPendingChapterUpdates();
-
-      const finalBatch: Array<{ outlineId: number; chapterIndex: number; content: string }> = [];
-      tasks.forEach((task, taskIndex) => {
-        const raw = rawContents[taskIndex] || "";
-        const jsonData = extractJSON(raw);
-        const finalContent = ((jsonData?.content as string) || raw || "").trim();
-        if (finalContent) {
-          finalBatch.push({
-            outlineId: task.outline.id,
-            chapterIndex: task.chapterIndex,
-            content: finalContent,
-          });
+        if (streamRaf != null) {
+          cancelAnimationFrame(streamRaf);
+          streamRaf = null;
         }
-      });
-      applyChapterUpdates(finalBatch);
+        flushPending();
+
+        waveTasks.forEach((task, taskIndex) => {
+          const finalDraft = extractParagraphContent(rawContents[taskIndex] || "");
+          if (!finalDraft) return;
+          workingDrafts.set(
+            `${task.outline.id}:${task.chapterIndex}:${task.paragraphIndex}`,
+            finalDraft,
+          );
+          applyParagraphUpdates([
+            {
+              outlineId: task.outline.id,
+              chapterIndex: task.chapterIndex,
+              paragraphIndex: task.paragraphIndex,
+              draft: finalDraft,
+            },
+          ]);
+        });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "未知错误";
-      window.alert(`续写失败：${message}`);
+      window.alert(`段落草稿生成失败：${message}`);
     } finally {
-      if (chapterStreamRaf != null) {
-        cancelAnimationFrame(chapterStreamRaf);
-        chapterStreamRaf = null;
-      }
-      pendingChapterUpdates.clear();
+      if (streamRaf != null) cancelAnimationFrame(streamRaf);
+      pendingUpdates.clear();
       chapterGenerationLockRef.current = false;
       setIsGenerating(false);
     }
+  };
+
+  const runParagraphExpands = async (regenerateAll = false) => {
+    if (chapterGenerationLockRef.current || outlineGenerationLockRef.current) return;
+
+    let workingOutlines = structuredClone(outlines) as Outline[];
+
+    const getParagraphContent = (
+      outlineId: number,
+      chapterIndex: number,
+      paragraphIndex: number,
+    ): string => {
+      const outline = workingOutlines.find((item) => item.id === outlineId);
+      const paragraph = outline?.chapters[chapterIndex]?.paragraphs[paragraphIndex];
+      if (!paragraph) return "";
+      if (isParagraphExpandComplete(paragraph.content)) return paragraph.content;
+      if (isParagraphDraftComplete(paragraph.draft)) return paragraph.draft;
+      return paragraph.content || paragraph.draft;
+    };
+
+    const updateWorkingParagraph = (
+      outlineId: number,
+      chapterIndex: number,
+      paragraphIndex: number,
+      content: string,
+    ) => {
+      const outlineIdx = workingOutlines.findIndex((item) => item.id === outlineId);
+      if (outlineIdx === -1) return;
+      const outline = workingOutlines[outlineIdx];
+      const chapter = outline.chapters[chapterIndex];
+      if (!chapter) return;
+      const paragraphs = chapter.paragraphs.slice();
+      paragraphs[paragraphIndex] = { ...paragraphs[paragraphIndex], content };
+      const chapters = outline.chapters.slice();
+      chapters[chapterIndex] = {
+        ...chapter,
+        paragraphs,
+        content: joinChapterParagraphs(paragraphs),
+      };
+      workingOutlines = workingOutlines.slice();
+      workingOutlines[outlineIdx] = { ...outline, chapters };
+    };
+
+    setIsGenerating(true);
+    chapterGenerationLockRef.current = true;
+
+    try {
+      for (let round = 0; round < MAX_PARAGRAPH_EXPAND_ROUNDS; round += 1) {
+        const pendingTasks: ParagraphTask[] = workingOutlines.flatMap((outline) =>
+          outline.chapters.flatMap((chapter, chapterIndex) =>
+            chapter.paragraphs
+              .map((paragraph, paragraphIndex) => ({
+                outline,
+                chapterIndex,
+                paragraphIndex,
+                paragraph,
+              }))
+              .filter(({ paragraph }) => {
+                if (!isParagraphDraftComplete(paragraph.draft)) return false;
+                if (regenerateAll && round === 0) return true;
+                return !isParagraphExpandComplete(paragraph.content);
+              }),
+          ),
+        );
+
+        if (pendingTasks.length === 0) break;
+
+        const waveKeys = new Map<string, ParagraphTask[]>();
+        for (const task of pendingTasks) {
+          const waveKey = `${task.chapterIndex}:${task.paragraphIndex}`;
+          const wave = waveKeys.get(waveKey) ?? [];
+          wave.push(task);
+          waveKeys.set(waveKey, wave);
+        }
+
+        const sortedWaveKeys = [...waveKeys.keys()].sort((a, b) => {
+          const [aChapter, aParagraph] = a.split(":").map(Number);
+          const [bChapter, bParagraph] = b.split(":").map(Number);
+          return aChapter - bChapter || aParagraph - bParagraph;
+        });
+
+        for (const waveKey of sortedWaveKeys) {
+          const waveTasks = waveKeys.get(waveKey)!;
+          const inputs = waveTasks.map(({ outline, chapterIndex, paragraphIndex }) => {
+            const currentContent = getParagraphContent(
+              outline.id,
+              chapterIndex,
+              paragraphIndex,
+            );
+            const previousParagraphContent =
+              paragraphIndex > 0
+                ? getParagraphContent(outline.id, chapterIndex, paragraphIndex - 1)
+                : undefined;
+            const previousChapterContent =
+              chapterIndex > 0
+                ? joinChapterParagraphs(
+                    outline.chapters[chapterIndex - 1].paragraphs.map((_, index) => ({
+                      id: index + 1,
+                      outline: "",
+                      draft: "",
+                      content: getParagraphContent(outline.id, chapterIndex - 1, index),
+                    })),
+                  ) || undefined
+                : undefined;
+
+            return buildParagraphExpandTask(
+              outline,
+              chapterIndex,
+              paragraphIndex,
+              currentContent,
+              previousParagraphContent,
+              previousChapterContent,
+            );
+          });
+
+          const rawContents = await rwkvService.expandParagraphs(inputs);
+
+          const batch = waveTasks.flatMap((task, taskIndex) => {
+            const expanded = extractParagraphContent(rawContents[taskIndex] || "");
+            if (!expanded) return [];
+            updateWorkingParagraph(
+              task.outline.id,
+              task.chapterIndex,
+              task.paragraphIndex,
+              expanded,
+            );
+            return [
+              {
+                outlineId: task.outline.id,
+                chapterIndex: task.chapterIndex,
+                paragraphIndex: task.paragraphIndex,
+                content: expanded,
+              },
+            ];
+          });
+          applyParagraphUpdates(batch);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "未知错误";
+      window.alert(`段落扩写失败：${message}`);
+    } finally {
+      chapterGenerationLockRef.current = false;
+      setIsGenerating(false);
+    }
+  };
+
+  const runNextGenerationStage = async (regenerateAll = false) => {
+    const stage = getGenerationStage(outlines);
+    if (stage === "worldbuilding") {
+      await generateOutlinesAndChapters();
+      return;
+    }
+    if (stage === "paragraphs") {
+      await runParagraphDrafts(regenerateAll);
+      return;
+    }
+    if (stage === "expand") {
+      await runParagraphExpands(regenerateAll);
+      return;
+    }
+    await runParagraphDrafts(true);
+    await runParagraphExpands(true);
   };
 
   const resetFlow = () => {
     outlineGenerationLockRef.current = false;
     chapterGenerationLockRef.current = false;
     setIsGenerating(false);
-    stripSeedQueryFromUrl();
+    stripLaunchQueryFromUrl();
     clearPersistedOutlines();
     setOutlines(createOutlinePlaceholders(OUTLINE_TOTAL));
+    // 重置后送回首页选题材，避免停留在没有可操作内容的工作台。
+    router.replace("/");
   };
+
+  const generationStage = useMemo(() => getGenerationStage(outlines), [outlines]);
 
   const outlinesReady = useMemo(
     () => outlines.some((outline) => outline.chapters.length > 0),
     [outlines],
   );
 
-  const allChapterBodiesComplete = useMemo(() => {
-    if (!outlines.some((o) => o.chapters.length > 0)) return false;
-
-    const chaptersNeedingWork = outlines.flatMap((outline) =>
-      outline.chapters.filter((chapter) => {
-        const outlineText = chapter.outline?.trim();
-        return Boolean(outlineText) && outlineText !== "待生成" && !isStableContent(chapter.content);
-      }),
-    );
-
-    const hasAnyStableChapter = outlines.some((o) =>
-      o.chapters.some((c) => isStableContent(c.content)),
-    );
-
-    return chaptersNeedingWork.length === 0 && hasAnyStableChapter;
-  }, [outlines]);
-
-  const isSecondRound = outlinesReady;
-  const primaryButtonLabel = isGenerating
-    ? "处理中"
-    : !isSecondRound
-      ? "生成大纲"
-      : allChapterBodiesComplete
-        ? "重新生成"
-        : "续写全部";
+  const primaryButtonLabel = isGenerating ? "处理中" : STAGE_LABELS[generationStage];
   const disablePrimaryButton =
-    isGenerating || (!isSecondRound && !novelInput.trim());
+    isGenerating || (generationStage === "worldbuilding" && !novelInput.trim());
 
   const handlePrimaryAction = () => {
     if (isGenerating) return;
-    if (isSecondRound) {
-      void generateAllChapterContents(allChapterBodiesComplete);
-      return;
-    }
-    void generateOutlinesAndChapters();
-  };
-
-  const handlePresetSelect = (prompt: string) => {
-    if (isGenerating) return;
-    setNovelInput(prompt);
+    void runNextGenerationStage(generationStage === "complete");
   };
 
   return (
     <div className="min-h-screen w-full min-w-0 overflow-x-hidden bg-[radial-gradient(circle_at_10%_20%,rgba(56,189,248,0.14),transparent_45%),radial-gradient(circle_at_90%_10%,rgba(236,72,153,0.12),transparent_45%),linear-gradient(180deg,#020617,#030712_48%,#0b1120)]">
       <RwkvProductionUpstreamSettings />
       <main className="w-full pb-36">
-        {!outlinesReady && !isGenerating ? (
-          <section className="flex min-h-[calc(100vh-76px)] w-full items-center justify-center px-4">
-            <div className="w-full max-w-5xl">
-              <div className="mb-6 text-center">
-                <h1 className="text-3xl font-semibold tracking-tight text-foreground">
-                  选一种风格，开始写你的小说
-                </h1>
-                <p className="mt-2 text-sm text-muted-foreground">
-                  点预设会把文案填到底栏；确认后点「生成大纲」并发生成 {OUTLINE_TOTAL} 份 {DEFAULT_CHAPTER_COUNT}{" "}
-                  章大纲；也可直接改底栏再生成。
-                </p>
-              </div>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-                {PROMPT_PRESETS.map((preset) => (
-                  <button
-                    key={preset.label}
-                    type="button"
-                    onClick={() => handlePresetSelect(preset.prompt)}
-                    className="group relative overflow-hidden rounded-xl border border-border/70 bg-card/80 p-4 text-left shadow-sm backdrop-blur-sm transition-all hover:-translate-y-0.5 hover:shadow-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
-                  >
-                    <div
-                      className={`absolute inset-x-0 top-0 h-1 bg-linear-to-r ${preset.accent}`}
-                      aria-hidden
-                    />
-                    <div className="flex items-center justify-between">
-                      <span className="text-base font-semibold text-foreground">{preset.label}</span>
-                      <Sparkles className="h-3.5 w-3.5 text-muted-foreground transition-colors group-hover:text-primary" />
-                    </div>
-                    <p className="mt-0.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-                      {preset.tagline}
-                    </p>
-                    <p className="mt-2 line-clamp-3 text-xs leading-5 text-muted-foreground">
-                      {preset.prompt}
-                    </p>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </section>
-        ) : (
-          <section className="relative z-0 grid min-h-0 h-[calc(100vh-7.5rem)] grid-cols-5 grid-rows-2 items-stretch gap-3 p-3">
-            {outlines.map((outline) => (
-              <OutlineCard
-                key={outline.id}
-                outline={outline}
-                onSelect={openOutlineDetails}
-                isGenerating={isGenerating}
-              />
-            ))}
-          </section>
-        )}
-
+        {/* 始终渲染同一张 10 卡网格——空 outline 的骨架就是 loading 占位，不再用 spinner→grid
+            的二段切换，也就不会有上一版那种「一闪一闪」的过渡。 */}
+        <section className="relative z-0 grid min-h-0 h-[calc(100vh-7.5rem)] grid-cols-5 grid-rows-2 items-stretch gap-3 p-3">
+          {outlines.map((outline) => (
+            <OutlineCard
+              key={outline.id}
+              outline={outline}
+              onSelect={openOutlineDetails}
+              isGenerating={isGenerating}
+            />
+          ))}
+        </section>
       </main>
 
       <div className="pointer-events-none fixed bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] left-1/2 z-50 w-[min(720px,calc(100%-24px))] max-w-full -translate-x-1/2">
@@ -713,16 +920,16 @@ export default function Home() {
             <Textarea
               value={novelInput}
               onChange={(e) => setNovelInput(e.target.value)}
-              readOnly={isSecondRound}
+              readOnly={outlinesReady}
               placeholder={
-                isSecondRound
-                  ? "创建时的总设定（只读）；续写每章仅依据该章标题与梗概"
+                outlinesReady
+                  ? "创建时的总设定（只读）；三轮流程：世界观 → 段落草稿 → 段落扩写"
                   : "题材、世界观、主角设定..."
               }
               rows={2}
               className={cn(
                 "min-h-18 max-h-36 min-w-0 flex-1 basis-0 resize-none overflow-y-auto overflow-x-hidden rounded-lg border border-border/70 bg-background/90 px-3 py-2.5 text-sm leading-relaxed text-foreground shadow-none focus-visible:ring-1 focus-visible:ring-ring/40",
-                isSecondRound &&
+                outlinesReady &&
                   "cursor-not-allowed bg-muted/40 text-foreground/90 ring-1 ring-border/60 focus-visible:ring-0",
               )}
             />
@@ -744,9 +951,9 @@ export default function Home() {
                   <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
                   处理中
                 </>
-              ) : isSecondRound ? (
+              ) : outlinesReady ? (
                 <>
-                  {allChapterBodiesComplete && !isGenerating ? (
+                  {generationStage === "complete" ? (
                     <RefreshCw className="mr-1.5 h-4 w-4" />
                   ) : (
                     <Wand2 className="mr-1.5 h-4 w-4" />

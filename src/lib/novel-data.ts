@@ -1,9 +1,31 @@
 import { extractParseableJsonObject, stripLlmJsonNoise } from "@/lib/extract-parseable-json";
 
+export interface NovelCharacter {
+  name: string;
+  role: string;
+  personality: string;
+  background: string;
+}
+
+export interface NovelWorldbuilding {
+  setting: string;
+  rules: string;
+  themes: string;
+  characters: NovelCharacter[];
+}
+
+export interface NovelParagraph {
+  id: number;
+  outline: string;
+  draft: string;
+  content: string;
+}
+
 export interface NovelChapter {
   id: number;
   title: string;
   outline: string;
+  paragraphs: NovelParagraph[];
   content: string;
 }
 
@@ -11,11 +33,12 @@ export interface NovelOutline {
   id: number;
   title: string;
   summary: string;
+  worldbuilding: NovelWorldbuilding;
   chapters: NovelChapter[];
   rawContent: string;
 }
 
-export const NOVEL_OUTLINES_STORAGE_KEY = "novel.outlines.v1";
+export const NOVEL_OUTLINES_STORAGE_KEY = "novel.outlines.v2";
 export const NOVEL_LAUNCH_PROMPT_KEY = "novel.launch.prompt.v1";
 export const NOVEL_LAUNCH_SESSION_KEY = "novel.launch.session.v1";
 
@@ -88,14 +111,74 @@ const extractQuotedField = (raw: string, key: string): string => {
 
 const parseRecord = (raw: string): Record<string, unknown> | null => extractParseableJsonObject(raw);
 
-export const isChapterOutputComplete = (value: string): boolean => {
+const PENDING_MARKERS = ["生成中...", "扩写中...", "续写中", "写段中..."];
+
+const isStableText = (value: string): boolean => {
   const text = value.trim();
   if (!text) return false;
-  if (text.includes("生成中...") || text.includes("扩写中...") || text.includes("生成失败")) {
-    return false;
+  return !PENDING_MARKERS.some((marker) => text.includes(marker) || text.startsWith(marker));
+};
+
+export const isChapterOutputComplete = (chapter: Pick<NovelChapter, "content" | "paragraphs">): boolean => {
+  if (chapter.paragraphs?.length) {
+    return chapter.paragraphs.every(
+      (paragraph) => isStableText(paragraph.content) && paragraph.content.trim().length >= 120,
+    );
   }
-  if (text.startsWith("续写中")) return false;
-  return true;
+  return isStableText(chapter.content);
+};
+const migrateChapter = (chapter: Partial<NovelChapter> & Record<string, unknown>): NovelChapter => {
+  const id = typeof chapter.id === "number" ? chapter.id : 1;
+  const title = typeof chapter.title === "string" ? chapter.title : `第${id}章`;
+  const outline = typeof chapter.outline === "string" ? chapter.outline : "";
+  const content = typeof chapter.content === "string" ? chapter.content : "";
+
+  if (Array.isArray(chapter.paragraphs) && chapter.paragraphs.length > 0) {
+    return {
+      id,
+      title,
+      outline,
+      content,
+      paragraphs: chapter.paragraphs as NovelParagraph[],
+    };
+  }
+
+  return {
+    id,
+    title,
+    outline,
+    content,
+    paragraphs: [
+      {
+        id: 1,
+        outline: outline || "待生成",
+        draft: "",
+        content,
+      },
+    ],
+  };
+};
+
+const migrateOutline = (outline: Partial<NovelOutline> & Record<string, unknown>): NovelOutline => {
+  const chaptersRaw = Array.isArray(outline.chapters) ? outline.chapters : [];
+  const worldbuildingRaw = outline.worldbuilding;
+
+  return {
+    id: typeof outline.id === "number" ? outline.id : 1,
+    title: typeof outline.title === "string" ? outline.title : "大纲",
+    summary: typeof outline.summary === "string" ? outline.summary : "",
+    worldbuilding:
+      worldbuildingRaw && typeof worldbuildingRaw === "object"
+        ? (worldbuildingRaw as NovelWorldbuilding)
+        : { setting: "", rules: "", themes: "", characters: [] },
+    chapters: chaptersRaw.map((chapter, index) =>
+      migrateChapter({
+        ...((chapter ?? {}) as unknown as Record<string, unknown>),
+        id: (chapter as Partial<NovelChapter>).id ?? index + 1,
+      }),
+    ),
+    rawContent: typeof outline.rawContent === "string" ? outline.rawContent : "",
+  };
 };
 
 export const isOutlineOutputComplete = (outline: Pick<NovelOutline, "rawContent" | "chapters">): boolean => {
@@ -106,6 +189,23 @@ export const isOutlineOutputComplete = (outline: Pick<NovelOutline, "rawContent"
     const chapterOutline = chapter.outline?.trim();
     return Boolean(title) && Boolean(chapterOutline) && chapterOutline !== "待生成";
   });
+};
+
+/**
+ * Strip JSON envelope leftovers that leak into rendered text when the model's
+ * output never properly closes (`{"content":"…prose…` truncated mid-stream):
+ *   - leading `{` / `["content":"`
+ *   - trailing `"`, `}`, or a stray opening `{` from a partial second object
+ * Conservative: only nibbles obvious JSON-syntax chars at boundaries, never
+ * touches the middle of the prose.
+ */
+const stripJsonEnvelopeNoise = (text: string): string => {
+  let out = text;
+  // Leading: drop `{` and any `"key":"` opener fragment.
+  out = out.replace(/^\s*\{?\s*"(?:content|正文|章节内容|text|内容)"\s*:\s*"?/, "");
+  // Trailing: drop unbalanced `"`, `}`, and a final stray `{` (partial 2nd obj).
+  out = out.replace(/["}\s]*\{?\s*$/, "");
+  return out.trim();
 };
 
 export const normalizeChapterContent = (raw: string): string => {
@@ -123,7 +223,7 @@ export const normalizeChapterContent = (raw: string): string => {
     extractQuotedField(cleaned, "text");
   if (fromQuoted) return fromQuoted;
 
-  return decodeEscaped(cleaned);
+  return stripJsonEnvelopeNoise(decodeEscaped(cleaned));
 };
 
 export const persistOutlines = (outlines: NovelOutline[]): void => {
@@ -154,7 +254,11 @@ export const readPersistedOutlines = (): NovelOutline[] => {
     }
 
     const parsed = JSON.parse(raw) as unknown;
-    cachedOutlinesValue = Array.isArray(parsed) ? (parsed as NovelOutline[]) : EMPTY_OUTLINES;
+    cachedOutlinesValue = Array.isArray(parsed)
+      ? parsed.map((item) =>
+          migrateOutline((item ?? {}) as Partial<NovelOutline> & Record<string, unknown>),
+        )
+      : EMPTY_OUTLINES;
     return cachedOutlinesValue;
   } catch {
     cachedOutlinesRaw = null;

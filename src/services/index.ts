@@ -1,12 +1,16 @@
 /**
  * RWKV API Service
  * 客户端封装：按业务拆分的专用 Next.js API 路由
- *   - POST /api/outlines  生成多份大纲
- *   - POST /api/chapters  基于梗概并发生成章节正文
- *   - POST /api/expand    对现有章节正文并发扩写
+ *   - POST /api/outlines  第一轮：生成世界观与章节段落结构
+ *   - POST /api/chapters  第二轮：按段落生成草稿
+ *   - POST /api/expand    第三轮：扩写段落（可重复直到达标）
  */
 
 import { rwkvCredentialsForApiBody } from "@/lib/rwkv-client-settings";
+import type {
+  ParagraphExpandTask,
+  ParagraphGenerationTask,
+} from "@/lib/novel-generation";
 
 // ========== 类型定义 ==========
 
@@ -294,44 +298,36 @@ class RWKVService {
   }
 
   /**
-   * 一次性高并发生成所有章节正文：
-   * 每条 prompt 只含「本章标题 + 本章概括」，一次 POST /api/chapters 交给上游并发执行。
+   * 第二轮：并发生成段落草稿。
    */
-  async generateChaptersByTasks(
-    chapters: Array<{ title: string; outline: string }>,
+  async generateParagraphDrafts(
+    paragraphs: ParagraphGenerationTask[],
     onUpdate?: (index: number, content: string) => void,
     onComplete?: (index: number, content: string) => void,
   ): Promise<string[]> {
-    if (chapters.length === 0) return [];
+    if (paragraphs.length === 0) return [];
 
     return this.postAndStream(
       this.endpoints.chapters,
-      { chapters },
+      { chapters: paragraphs },
       onUpdate,
       onComplete,
     );
   }
 
-  /** 单大纲多章正文生成（内部走同一个 /api/chapters） */
-  async generateChapters(
-    chapters: Array<{ title: string; outline: string }>,
-    onUpdate?: (index: number, content: string) => void,
-    onComplete?: (index: number, content: string) => void,
-  ): Promise<string[]> {
-    return this.generateChaptersByTasks(chapters, onUpdate, onComplete);
-  }
-
   /**
-   * 并发扩写已有章节正文
+   * 第三轮：扩写段落（单次）；前端可循环调用直到字数达标。
    */
-  async expandChapters(
-    chapters: Array<{ title: string; outline: string; currentContent: string }>,
+  async expandParagraphs(
+    paragraphs: ParagraphExpandTask[],
     onUpdate?: (index: number, content: string) => void,
     onComplete?: (index: number, content: string) => void,
   ): Promise<string[]> {
+    if (paragraphs.length === 0) return [];
+
     return this.postAndStream(
       this.endpoints.expand,
-      { chapters },
+      { chapters: paragraphs },
       onUpdate,
       onComplete,
     );
