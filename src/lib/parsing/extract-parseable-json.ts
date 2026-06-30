@@ -5,6 +5,10 @@
  * - Trailing junk after a valid object
  *
  * Uses brace matching with string/escape awareness (not a full JSON tokenizer).
+ *
+ * Key contract: the prompt (see `rwkv-prompts.ts`) asks the model for English
+ * JSON keys (`"chapter"`, `"title"`, `"outline"`, …). Extraction here trusts
+ * that contract — no Chinese-key 兜底.
  */
 
 /** Strips thinking blocks and all ``` / ```json fences (models often reopen fences mid-stream). */
@@ -123,6 +127,82 @@ const extractQuotedField = (raw: string, key: string): string => {
 };
 
 /**
+ * Walk `slice` looking for the `"paragraphs": [` array opener, then pull
+ * every paragraph outline out of it — handles both element shapes the model
+ * actually emits: `["text", ...]` (plain strings) and `[{"outline":"text"}]`.
+ * Stops at the array's closing `]` (or the slice end, for streaming-truncated
+ * input). Returns up to 8 entries — chapter paragraphs are short, this is just
+ * a runaway guard.
+ */
+const extractParagraphOutlines = (slice: string): string[] => {
+  const anchor = slice.search(/"paragraphs"\s*:\s*\[/);
+  if (anchor === -1) return [];
+  const arrayStart = slice.indexOf("[", anchor);
+  if (arrayStart === -1) return [];
+
+  const out: string[] = [];
+  let i = arrayStart + 1;
+  while (i < slice.length && out.length < 8) {
+    while (i < slice.length && /[\s,]/.test(slice[i])) i++;
+    if (i >= slice.length) break;
+    const c = slice[i];
+    if (c === "]") break;
+
+    if (c === '"') {
+      // Plain string element: `"段落要点"`
+      const text = readQuotedString(slice, i + 1);
+      if (text === null) break;
+      if (text.value) out.push(text.value);
+      i = text.endIndex + 1;
+    } else if (c === "{") {
+      // Object element: `{"outline": "段落要点"}` — pull the outline field.
+      const objEnd = findBalancedJsonEnd(slice, i);
+      const objSlice = slice.slice(i, objEnd === -1 ? slice.length : objEnd + 1);
+      const text = extractQuotedField(objSlice, "outline");
+      if (text) out.push(text);
+      if (objEnd === -1) break;
+      i = objEnd + 1;
+    } else {
+      // Unknown shape — bail rather than spin.
+      break;
+    }
+  }
+  return out;
+};
+
+const readQuotedString = (
+  s: string,
+  start: number,
+): { value: string; endIndex: number } | null => {
+  let out = "";
+  let esc = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (esc) {
+      out += c;
+      esc = false;
+      continue;
+    }
+    if (c === "\\") {
+      esc = true;
+      continue;
+    }
+    if (c === '"') {
+      return {
+        value: out
+          .replace(/\\n/g, "\n")
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, "\\")
+          .trim(),
+        endIndex: i,
+      };
+    }
+    out += c;
+  }
+  return null;
+};
+
+/**
  * Recover chapter records from streaming/broken LLM JSON.
  *
  * Why not just JSON.parse? Outline output regularly arrives malformed in three
@@ -145,21 +225,13 @@ export const extractChapterRecords = (
   const cleaned = stripLlmJsonNoise(raw);
   if (!cleaned) return [];
 
-  const arrayAnchor = cleaned.match(/"(chapters|章节)"\s*:\s*\[/);
+  const arrayAnchor = cleaned.match(/"chapters"\s*:\s*\[/);
   const scanStart =
     arrayAnchor && arrayAnchor.index !== undefined
       ? arrayAnchor.index + arrayAnchor[0].length
       : 0;
 
-  // Match each chapter boundary. The model produces two shapes after a botched
-  // close: (a) `{ "chapter": ...}` proper object, (b) bare `"chapter": "..."`
-  // siblings without an opener. Match both. The key occurrence anchors a
-  // chapter regardless of whether the `{` is present.
-  //
-  // Guard: the same key string appears inside outline text in some models. Skip
-  // when the preceding non-space char is `:` (means we're inside a string
-  // value) — JSON ascii structural chars before our key should be `{`, `,`, or `[`.
-  const chapterKeyRe = /"(chapter|章节)"\s*:/g;
+  const chapterKeyRe = /"chapter"\s*:/g;
   chapterKeyRe.lastIndex = scanStart;
 
   const anchors: number[] = [];
@@ -169,18 +241,15 @@ export const extractChapterRecords = (
     while (j >= 0 && /\s/.test(cleaned[j])) j--;
     const prev = j >= 0 ? cleaned[j] : "";
     if (prev !== "{" && prev !== "," && prev !== "[" && prev !== "") continue;
-    // Anchor at preceding `{` if present, else at the bare key (no opener).
     anchors.push(prev === "{" ? j : m.index);
   }
   if (anchors.length === 0) return [];
-
-  const findBalanced = (start: number): number => findBalancedJsonEnd(cleaned, start);
 
   const rows: Record<string, unknown>[] = [];
   for (let i = 0; i < anchors.length; i++) {
     const start = anchors[i];
     const nextAnchor = i + 1 < anchors.length ? anchors[i + 1] : cleaned.length;
-    const balancedEnd = findBalanced(start);
+    const balancedEnd = findBalancedJsonEnd(cleaned, start);
     const sliceEnd =
       balancedEnd !== -1 && balancedEnd < nextAnchor ? balancedEnd + 1 : nextAnchor;
     const slice = cleaned.slice(start, sliceEnd);
@@ -194,22 +263,19 @@ export const extractChapterRecords = (
           recorded = true;
         }
       } catch {
-        // fall through
+        // streaming JSON is regularly malformed; fall through to regex extraction.
       }
     }
     if (!recorded) {
       const row: Record<string, unknown> = {};
-      const chapter =
-        extractQuotedField(slice, "chapter") || extractQuotedField(slice, "章节");
-      const title =
-        extractQuotedField(slice, "title") || extractQuotedField(slice, "标题");
-      const outline =
-        extractQuotedField(slice, "outline") ||
-        extractQuotedField(slice, "梗概") ||
-        extractQuotedField(slice, "内容梗概");
+      const chapter = extractQuotedField(slice, "chapter");
+      const title = extractQuotedField(slice, "title");
+      const outline = extractQuotedField(slice, "outline");
       if (chapter) row.chapter = chapter;
       if (title) row.title = title;
       if (outline) row.outline = outline;
+      const paragraphs = extractParagraphOutlines(slice);
+      if (paragraphs.length > 0) row.paragraphs = paragraphs;
       if (Object.keys(row).length > 0) rows.push(row);
     }
   }
@@ -220,7 +286,9 @@ export const extractChapterRecords = (
 /**
  * Returns the best-effort single object from noisy LLM text, or null.
  */
-export const extractParseableJsonObject = (raw: string): Record<string, unknown> | null => {
+export const extractParseableJsonObject = (
+  raw: string,
+): Record<string, unknown> | null => {
   if (!raw || !raw.trim()) {
     return null;
   }
@@ -233,7 +301,7 @@ export const extractParseableJsonObject = (raw: string): Record<string, unknown>
   try {
     return JSON.parse(cleaned) as Record<string, unknown>;
   } catch {
-    // fall through
+    // The whole blob isn't valid JSON; scan for any balanced object inside it.
   }
 
   const slices = collectBalancedTopLevelSlices(cleaned);
@@ -249,7 +317,7 @@ export const extractParseableJsonObject = (raw: string): Record<string, unknown>
         best = obj;
       }
     } catch {
-      // skip invalid slice
+      // This particular slice's braces didn't form valid JSON; move on.
     }
   }
 

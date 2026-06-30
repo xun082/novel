@@ -3,7 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ChevronDown, ChevronUp, FileText } from "lucide-react";
-import { normalizeChapterContent } from "@/lib/novel-data";
+import { normalizeChapterContent } from "@/lib/novel/novel-data";
 
 interface Chapter {
   id: number;

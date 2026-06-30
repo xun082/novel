@@ -6,11 +6,11 @@
  *   - POST /api/expand    第三轮：扩写段落（可重复直到达标）
  */
 
-import { rwkvCredentialsForApiBody } from "@/lib/rwkv-client-settings";
+import { rwkvCredentialsForApiBody } from "@/lib/storage/rwkv-client-settings";
 import type {
   ParagraphExpandTask,
   ParagraphGenerationTask,
-} from "@/lib/novel-generation";
+} from "@/lib/novel/novel-generation";
 
 // ========== 类型定义 ==========
 

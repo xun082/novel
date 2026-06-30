@@ -13,7 +13,7 @@ import {
   subscribePersistedOutlines,
   type NovelOutline,
   readPersistedOutlines,
-} from "@/lib/novel-data";
+} from "@/lib/novel/novel-data";
 
 export default function OutlineDetailPage() {
   const params = useParams<{ outlineId: string }>();

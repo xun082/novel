@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef } from "react";
 import { Card, CardContent } from "@/components/ui/card";
-import { normalizeChapterContent, type NovelChapter, type NovelOutline } from "@/lib/novel-data";
+import { normalizeChapterContent, type NovelChapter, type NovelOutline } from "@/lib/novel/novel-data";
 import {
   extractChapterRecords,
   extractParseableJsonObject,
   stripLlmJsonNoise,
-} from "@/lib/extract-parseable-json";
+} from "@/lib/parsing/extract-parseable-json";
 
 interface OutlineCardProps {
   outline: NovelOutline;

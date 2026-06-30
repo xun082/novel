@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { RwkvProductionUpstreamSettings } from "@/components/RwkvProductionUpstreamSettings";
 import { usePromptStore } from "@/components/PromptStoreProvider";
-import { publishLaunch } from "@/lib/launch-store";
+import { publishLaunch } from "@/lib/storage/launch-store";
 
 interface PromptPreset {
   label: string;

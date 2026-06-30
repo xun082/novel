@@ -72,6 +72,11 @@ export async function rwkvBatchCompletion(
 
   const decodeConfig = mergeDecodeConfig(opts.decodeConfig);
   const endpoint = opts.endpoint ?? RWKV_ENDPOINT;
+  if (!endpoint) {
+    throw new Error(
+      "RWKV endpoint is not configured: set RWKV_UPSTREAM_URL or pass opts.endpoint",
+    );
+  }
   const password = opts.password ?? RWKV_API_PASSWORD;
 
   const payload: Record<string, unknown> = {

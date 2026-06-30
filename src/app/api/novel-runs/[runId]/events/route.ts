@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { NO_CACHE_HEADERS } from "@/lib/http/cache-headers";
 import { getRun, NovelEvent, subscribe } from "@/lib/novel/novel-store";
 
 export const runtime = "nodejs";
@@ -8,11 +9,8 @@ interface RouteContext {
   params: Promise<{ runId: string }>;
 }
 
-const NO_CACHE_HEADERS = {
-  "Cache-Control": "no-store, no-cache, must-revalidate, private, max-age=0",
-  Pragma: "no-cache",
-  Expires: "0",
-  "X-Accel-Buffering": "no",
+const SSE_HEADERS = {
+  ...NO_CACHE_HEADERS,
   "Content-Type": "text/event-stream; charset=utf-8",
 } as const;
 
@@ -103,5 +101,5 @@ export async function GET(
     },
   });
 
-  return new Response(stream, { headers: NO_CACHE_HEADERS });
+  return new Response(stream, { headers: SSE_HEADERS });
 }

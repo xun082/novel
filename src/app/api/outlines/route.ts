@@ -1,10 +1,10 @@
 import { NextRequest } from "next/server";
+import { NO_CACHE_HEADERS } from "@/lib/http/cache-headers";
+import { buildOutlinePrompts } from "@/lib/rwkv/rwkv-prompts";
 import {
-  buildOutlinePrompts,
   callUpstreamStream,
-  NO_CACHE_HEADERS,
   upstreamCredentialsFromPayload,
-} from "../_lib/rwkv";
+} from "@/lib/rwkv/rwkv-stream";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;

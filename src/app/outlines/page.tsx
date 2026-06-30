@@ -15,8 +15,7 @@ import {
   readPersistedOutlines,
   type NovelChapter,
   type NovelOutline,
-  type NovelParagraph,
-} from "@/lib/novel-data";
+} from "@/lib/novel/novel-data";
 import {
   buildParagraphExpandTask,
   buildParagraphGenerationTask,
@@ -24,19 +23,18 @@ import {
   getGenerationStage,
   isParagraphDraftComplete,
   isParagraphExpandComplete,
-  isStableText,
   joinChapterParagraphs,
   MAX_PARAGRAPH_EXPAND_ROUNDS,
   parseParagraphRows,
   parseWorldbuilding,
   type GenerationStage,
-} from "@/lib/novel-generation";
+} from "@/lib/novel/novel-generation";
 import { cn } from "@/lib/utils";
 import {
   extractChapterRecords,
   extractParseableJsonObject,
   stripLlmJsonNoise,
-} from "@/lib/extract-parseable-json";
+} from "@/lib/parsing/extract-parseable-json";
 import { RwkvProductionUpstreamSettings } from "@/components/RwkvProductionUpstreamSettings";
 import { usePromptStore } from "@/components/PromptStoreProvider";
 import {
@@ -44,11 +42,10 @@ import {
   getCurrentGenerationToken,
   isGenerationActive,
   markGenerationFinished,
-} from "@/lib/launch-store";
+} from "@/lib/storage/launch-store";
 
 type Outline = NovelOutline;
 type Chapter = NovelChapter;
-type Paragraph = NovelParagraph;
 
 const STAGE_LABELS: Record<GenerationStage, string> = {
   worldbuilding: "生成世界观",
@@ -62,8 +59,6 @@ const OUTLINE_TOTAL = 10;
 // N=120 稳定可用）。10 × 8 = 80 有充裕余量，同时也给每条 prompt 更多 max_tokens 空间，
 // 章节正文不容易因 token 用尽而被截断。
 const DEFAULT_CHAPTER_COUNT = 8;
-
-const isStableContent = isStableText;
 
 const createOutlinePlaceholders = (count: number): Outline[] =>
   Array.from({ length: count }, (_, index) => ({
@@ -177,36 +172,32 @@ export default function Home() {
     count: number,
     withFallback: boolean,
   ): Chapter[] => {
-    const raw = (jsonData?.chapters || jsonData?.章节 || []) as unknown;
+    const raw = jsonData?.chapters;
     const list = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
 
     const parsed = list.slice(0, count).map((chapterData, index) => {
       const outline =
-        (chapterData.outline as string) ||
-        (chapterData.梗概 as string) ||
-        (chapterData.内容梗概 as string) ||
-        "待生成";
-      const paragraphs = parseParagraphRows(chapterData, outline);
-
+        typeof chapterData.outline === "string" ? chapterData.outline : "";
+      const title =
+        (typeof chapterData.title === "string" && chapterData.title) ||
+        (typeof chapterData.chapter === "string" && chapterData.chapter) ||
+        `第${index + 1}章`;
       return {
         id: index + 1,
-        title:
-          (chapterData.title as string) ||
-          (chapterData.标题 as string) ||
-          (chapterData.chapter as string) ||
-          `第${index + 1}章`,
+        title,
         outline,
-        paragraphs,
+        paragraphs: parseParagraphRows(chapterData),
         content: "",
       };
     });
 
     if (parsed.length > 0 || !withFallback) return parsed;
 
+    // Streaming placeholder rows so the UI shows skeletons until the model fills them.
     return Array.from({ length: count }, (_, i) => ({
       id: i + 1,
       title: `第${i + 1}章`,
-      outline: "待生成",
+      outline: "",
       paragraphs: [],
       content: "",
     }));
@@ -235,15 +226,10 @@ export default function Home() {
   const parseOutline = (rawContent: string, index: number): Outline => {
     const jsonData = extractJSON(rawContent);
     const title =
-      (jsonData?.title as string) ||
-      (jsonData?.标题 as string) ||
-      (jsonData?.小说标题 as string) ||
+      (typeof jsonData?.title === "string" && jsonData.title) ||
       `大纲 ${index + 1}`;
     const summary =
-      (jsonData?.summary as string) ||
-      (jsonData?.核心梗概 as string) ||
-      (jsonData?.梗概 as string) ||
-      "";
+      typeof jsonData?.summary === "string" ? jsonData.summary : "";
 
     return {
       id: index + 1,

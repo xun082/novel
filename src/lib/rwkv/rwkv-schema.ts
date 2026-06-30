@@ -12,7 +12,7 @@ export const rwkvResolvedUrlSchema = z.object({
   url: rwkvHttpUrlSchema,
 });
 
-/** callUpstreamStream 入参（采样参数由 rwkv.ts 内 RWKV_CALL_PARAMS 提供） */
+/** callUpstreamStream 入参（采样参数由 rwkv-config 内 RWKV_CALL_PARAMS 提供） */
 export const upstreamStreamRequestSchema = z.object({
   contents: z.array(z.string()).min(1),
   password: z.preprocess(emptyToUndefined, rwkvPasswordSchema.optional()),

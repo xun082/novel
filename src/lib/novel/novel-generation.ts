@@ -1,4 +1,9 @@
-import type { NovelChapter, NovelOutline, NovelParagraph, NovelWorldbuilding } from "@/lib/novel-data";
+import type {
+  NovelChapter,
+  NovelOutline,
+  NovelParagraph,
+  NovelWorldbuilding,
+} from "@/lib/novel/novel-data";
 
 export const PARAGRAPHS_PER_CHAPTER = 3;
 export const PARAGRAPH_EXPAND_MIN_CHARS = 180;
@@ -31,10 +36,14 @@ const PENDING_MARKERS = ["生成中...", "扩写中...", "续写中", "写段中
 export const isStableText = (value: string): boolean => {
   const text = value.trim();
   if (!text) return false;
-  return !PENDING_MARKERS.some((marker) => text.includes(marker) || text.startsWith(marker));
+  return !PENDING_MARKERS.some(
+    (marker) => text.includes(marker) || text.startsWith(marker),
+  );
 };
 
-export const formatWorldbuilding = (worldbuilding: NovelWorldbuilding): string => {
+export const formatWorldbuilding = (
+  worldbuilding: NovelWorldbuilding,
+): string => {
   const characters = worldbuilding.characters
     .map(
       (character) =>
@@ -43,16 +52,16 @@ export const formatWorldbuilding = (worldbuilding: NovelWorldbuilding): string =
     .join("\n");
 
   return `【故事背景】
-${worldbuilding.setting || "（暂无）"}
+${worldbuilding.setting}
 
 【世界观规则】
-${worldbuilding.rules || "（暂无）"}
+${worldbuilding.rules}
 
 【核心主题】
-${worldbuilding.themes || "（暂无）"}
+${worldbuilding.themes}
 
 【主要人物】
-${characters || "（暂无）"}`;
+${characters}`;
 };
 
 export const joinChapterParagraphs = (
@@ -83,98 +92,76 @@ export const emptyWorldbuilding = (): NovelWorldbuilding => ({
   characters: [],
 });
 
+/**
+ * Parse the worldbuilding block out of the model's first-round JSON.
+ *
+ * Contract: prompt asks the model for English keys (`worldbuilding`, `setting`,
+ * `rules`, `themes`, `characters`, and per-character `name`/`role`/
+ * `personality`/`background`). We trust that contract — characters missing the
+ * required English `name` are dropped, not relabeled "未命名".
+ */
 export const parseWorldbuilding = (
   jsonData: Record<string, unknown> | null,
 ): NovelWorldbuilding => {
-  const raw = jsonData?.worldbuilding ?? jsonData?.世界观 ?? jsonData?.world;
+  const raw = jsonData?.worldbuilding;
   if (!raw || typeof raw !== "object") return emptyWorldbuilding();
 
   const source = raw as Record<string, unknown>;
-  const characterRows = Array.isArray(source.characters)
-    ? source.characters
-    : Array.isArray(source.人物)
-      ? source.人物
-      : [];
+  const characterRows = Array.isArray(source.characters) ? source.characters : [];
 
-  const characters = characterRows
-    .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === "object")
+  const characters: NovelWorldbuilding["characters"] = characterRows
+    .filter(
+      (row): row is Record<string, unknown> =>
+        Boolean(row) && typeof row === "object",
+    )
     .map((row) => ({
-      name:
-        (typeof row.name === "string" && row.name) ||
-        (typeof row.姓名 === "string" && row.姓名) ||
-        "未命名",
-      role:
-        (typeof row.role === "string" && row.role) ||
-        (typeof row.角色 === "string" && row.角色) ||
-        "角色",
-      personality:
-        (typeof row.personality === "string" && row.personality) ||
-        (typeof row.性格 === "string" && row.性格) ||
-        "",
-      background:
-        (typeof row.background === "string" && row.background) ||
-        (typeof row.背景 === "string" && row.背景) ||
-        "",
-    }));
+      name: typeof row.name === "string" ? row.name : "",
+      role: typeof row.role === "string" ? row.role : "",
+      personality: typeof row.personality === "string" ? row.personality : "",
+      background: typeof row.background === "string" ? row.background : "",
+    }))
+    .filter((c) => c.name);
 
   return {
-    setting:
-      (typeof source.setting === "string" && source.setting) ||
-      (typeof source.故事背景 === "string" && source.故事背景) ||
-      "",
-    rules:
-      (typeof source.rules === "string" && source.rules) ||
-      (typeof source.世界观规则 === "string" && source.世界观规则) ||
-      "",
-    themes:
-      (typeof source.themes === "string" && source.themes) ||
-      (typeof source.核心主题 === "string" && source.核心主题) ||
-      "",
+    setting: typeof source.setting === "string" ? source.setting : "",
+    rules: typeof source.rules === "string" ? source.rules : "",
+    themes: typeof source.themes === "string" ? source.themes : "",
     characters,
   };
 };
 
+/**
+ * Parse the `paragraphs` array out of a chapter JSON.
+ *
+ * The model legitimately emits two element shapes for the same data:
+ *   - `"段落要点文本"`            — plain string (RWKV often does this)
+ *   - `{"outline": "段落要点文本"}` — what the prompt actually requests
+ * Both convey "this paragraph's outline" — accept either. Anything else is
+ * dropped. No padding, no "待生成" substitution.
+ */
 export const parseParagraphRows = (
   chapterData: Record<string, unknown>,
-  fallbackOutline: string,
 ): NovelParagraph[] => {
-  const raw = chapterData.paragraphs ?? chapterData.段落;
-  if (!Array.isArray(raw)) {
-    return Array.from({ length: PARAGRAPHS_PER_CHAPTER }, (_, index) => ({
-      id: index + 1,
-      outline: fallbackOutline || "待生成",
-      draft: "",
-      content: "",
-    }));
-  }
+  const raw = chapterData.paragraphs;
+  if (!Array.isArray(raw)) return [];
 
-  const parsed = raw
-    .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === "object")
+  return raw
     .slice(0, PARAGRAPHS_PER_CHAPTER)
-    .map((row, index) => ({
-      id: index + 1,
-      outline:
-        (typeof row.outline === "string" && row.outline) ||
-        (typeof row.梗概 === "string" && row.梗概) ||
-        fallbackOutline ||
-        "待生成",
-      draft: "",
-      content: "",
-    }));
-
-  while (parsed.length < PARAGRAPHS_PER_CHAPTER) {
-    parsed.push({
-      id: parsed.length + 1,
-      outline: fallbackOutline || "待生成",
-      draft: "",
-      content: "",
-    });
-  }
-
-  return parsed;
+    .map((row, index) => {
+      let outline = "";
+      if (typeof row === "string") {
+        outline = row;
+      } else if (row && typeof row === "object") {
+        const o = (row as { outline?: unknown }).outline;
+        if (typeof o === "string") outline = o;
+      }
+      return { id: index + 1, outline, draft: "", content: "" };
+    })
+    .filter((p) => p.outline);
 };
 
-export const isParagraphDraftComplete = (draft: string): boolean => isStableText(draft);
+export const isParagraphDraftComplete = (draft: string): boolean =>
+  isStableText(draft);
 
 export const isParagraphExpandComplete = (content: string): boolean =>
   isStableText(content) && content.trim().length >= PARAGRAPH_EXPAND_MIN_CHARS;
@@ -183,10 +170,14 @@ export const isChapterGenerationComplete = (chapter: NovelChapter): boolean => {
   if (!chapter.paragraphs.length) {
     return isStableText(chapter.content) && chapter.content.trim().length > 0;
   }
-  return chapter.paragraphs.every((paragraph) => isParagraphExpandComplete(paragraph.content));
+  return chapter.paragraphs.every((paragraph) =>
+    isParagraphExpandComplete(paragraph.content),
+  );
 };
 
-export const getGenerationStage = (outlines: NovelOutline[]): GenerationStage => {
+export const getGenerationStage = (
+  outlines: NovelOutline[],
+): GenerationStage => {
   const hasStructuredOutlines = outlines.some(
     (outline) =>
       outline.chapters.length > 0 &&
@@ -198,9 +189,7 @@ export const getGenerationStage = (outlines: NovelOutline[]): GenerationStage =>
     outline.chapters.some((chapter) =>
       chapter.paragraphs.some(
         (paragraph) =>
-          paragraph.outline.trim() &&
-          paragraph.outline !== "待生成" &&
-          !isParagraphDraftComplete(paragraph.draft),
+          paragraph.outline.trim() && !isParagraphDraftComplete(paragraph.draft),
       ),
     ),
   );

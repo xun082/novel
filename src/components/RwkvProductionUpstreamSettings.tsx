@@ -9,7 +9,7 @@ import {
   clearRwkvClientCredentials,
   readRwkvClientCredentials,
   writeRwkvClientCredentials,
-} from "@/lib/rwkv-client-settings";
+} from "@/lib/storage/rwkv-client-settings";
 import { cn } from "@/lib/utils";
 
 export function RwkvProductionUpstreamSettings() {
